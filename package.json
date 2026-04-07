@@ -1,0 +1,25 @@
+{
+  "name": "sfc-agentic-control-plane",
+  "version": "1.0.0",
+  "description": "CDK stack for the SFC Config Agent Agentic Control Plane",
+  "main": "bin/app.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk",
+    "deploy": "bash deploy.sh",
+    "synth": "cdk synth"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.0.0",
+    "aws-cdk": "^2.180.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.180.0",
+    "constructs": "^10.4.2",
+    "js-yaml": "^4.1.0"
+  }
+}
