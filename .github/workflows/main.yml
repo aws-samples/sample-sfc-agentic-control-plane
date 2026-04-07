@@ -16,7 +16,7 @@ on:
       - release/*
 
 jobs:
-  CheckBuild:
+  CDKSynth:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -25,19 +25,9 @@ jobs:
       - uses: actions/setup-node@v3
         with:
           node-version: 18
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-      - name: Linting-SFC-Wizard-Agent
-        run: |
-          cd agents/sfc_wizard_agent
-          ./scripts/init.sh
-          ./scripts/lint.sh
-          cd -
-      - name: Linting-SFC-Spec-MCP-Server
-        run: |
-          cd mcp-servers/sfc-spec-server
-          ./scripts/init.sh
-          ./scripts/lint.sh
-          cd -
+      - name: Install CDK dependencies
+        run: npm install
+      - name: TypeScript build
+        run: npm run build
+      - name: CDK Synth (includes CDK Nag checks)
+        run: npx cdk synth

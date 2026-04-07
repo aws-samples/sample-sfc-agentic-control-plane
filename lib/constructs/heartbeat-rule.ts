@@ -6,6 +6,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
+import { NagSuppressions } from 'cdk-nag';
 
 /**
  * WP-08b — SfcHeartbeatRule CDK Construct.
@@ -92,5 +93,20 @@ export class SfcHeartbeatRule extends Construct {
         },
       },
     });
+
+    // ── CDK Nag Suppressions ──────────────────────────────────────────
+
+    // fn-heartbeat-ingestion — basic execution role + Python 3.12 are intentional
+    NagSuppressions.addResourceSuppressions(this.fnHeartbeat, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for the heartbeat ingestion Lambda.' },
+      { id: 'AwsSolutions-L1',   reason: 'Python 3.12 is the intentional pinned runtime for the heartbeat ingestion Lambda.' },
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'CDK grantReadWriteData generates <Table.Arn>/index/* wildcard for GSI access — CDK-generated.',
+        appliesTo: [
+          'Resource::<SfcConfigAgentInfraControlPlaneTablesLaunchPackageTable29C45052.Arn>/index/*',
+        ],
+      },
+    ], true);
   }
 }

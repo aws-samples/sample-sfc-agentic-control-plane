@@ -14,6 +14,7 @@ import {
   RemovalPolicy,
 } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
+import { NagSuppressions } from 'cdk-nag';
 import { SfcConfigAgentInfra } from './constructs/sfc-config-agent-infra';
 import { UiStack } from './ui-stack';
 
@@ -294,5 +295,100 @@ def send(event, context, status, data, physical_id):
     new CfnOutput(this, 'AgentRoleArn',               { value: agentRole.roleArn });
     new CfnOutput(this, 'AgentCoreDeploymentProject', { value: deploymentProject.projectName });
     new CfnOutput(this, 'SfcControlPlaneUiUrl',       { value: uiStack.distributionUrl });
+
+    // ── CDK Nag Suppressions ──────────────────────────────────────────
+
+    // S3 buckets — server access logging intentionally omitted for internal CI/deploy buckets
+    NagSuppressions.addResourceSuppressions(sourceBucket, [
+      { id: 'AwsSolutions-S1', reason: 'Server access logging not required for internal CodeBuild source bucket in this sample.' },
+    ]);
+    NagSuppressions.addResourceSuppressions(artifactsBucket, [
+      { id: 'AwsSolutions-S1', reason: 'Server access logging not required for internal artifacts bucket in this sample.' },
+    ]);
+
+    // Agent IAM role — broad permissions required for AgentCore (ECR, Bedrock, IAM role creation for IoT provisioning)
+    NagSuppressions.addResourceSuppressions(agentRole, [
+      { id: 'AwsSolutions-IAM5', reason: 'Wildcard permissions required: ECR push needs account-wide auth token, Bedrock AgentCore uses dynamic resource ARNs, IAM role creation for IoT provisioning is intentional.' },
+    ], true);
+
+    // CodeBuild project — privileged mode required for Docker/ECR image builds
+    NagSuppressions.addResourceSuppressions(deploymentProject, [
+      { id: 'AwsSolutions-CB3', reason: 'Privileged mode required for Docker image builds when deploying the AgentCore container to ECR.' },
+      { id: 'AwsSolutions-CB4', reason: 'KMS CMK encryption not required for this sample project.' },
+    ]);
+
+    // Trigger Lambda — inline handler, basic execution role and Python 3.12 are intentional
+    NagSuppressions.addResourceSuppressions(triggerFn, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for this simple trigger function.' },
+      { id: 'AwsSolutions-L1', reason: 'Python 3.12 is the intentional runtime for this trigger Lambda.' },
+    ], true);
+
+    // Stack-level suppressions for CDK-generated singleton resources:
+    //
+    //  1. BucketDeployment singleton Lambda — CDK creates it at a fixed logical ID;
+    //     addResourceSuppressions on the BucketDeployment construct doesn't reach it.
+    //
+    //  2. LogRetention singleton Lambda — created by CDK for every logRetention property;
+    //     role and runtime are fully CDK-managed.
+    //
+    //  3. fn-logs / fn-iot-control ARN wildcards — region/account are resolved to literal
+    //     values at synth time so appliesTo must use the literal ARN pattern.
+    NagSuppressions.addStackSuppressions(this, [
+      // BucketDeployment + LogRetention: managed policy
+      {
+        id: 'AwsSolutions-IAM4',
+        reason: 'AWSLambdaBasicExecutionRole is attached by CDK to BucketDeployment and LogRetention singleton service roles — not user-controlled.',
+        appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'],
+      },
+      // BucketDeployment: latest runtime
+      {
+        id: 'AwsSolutions-L1',
+        reason: 'Runtime of the CDK BucketDeployment and LogRetention custom-resource Lambdas is managed by CDK — cannot be overridden by the user.',
+      },
+      // BucketDeployment: wildcard S3 actions in its default policy
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'CDK BucketDeployment singleton generates wildcard S3 actions in its service role default policy — not user-controlled.',
+        appliesTo: [
+          'Action::s3:GetBucket*',
+          'Action::s3:GetObject*',
+          'Action::s3:List*',
+          'Action::s3:Abort*',
+          'Action::s3:DeleteObject*',
+          'Resource::<SfcSourceBucket06025DE9.Arn>/*',
+        ],
+      },
+      // BucketDeployment: CDK staging bucket wildcard (account+region resolved at synth)
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'CDK BucketDeployment singleton accesses the CDK staging bucket — resource ARN is CDK-generated and account/region are resolved at synth time.',
+        appliesTo: [
+          `Resource::arn:aws:s3:::cdk-hnb659fds-assets-${this.account}-${this.region}/*`,
+        ],
+      },
+      // LogRetention default policy: Resource::*
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'Resource::* on the CDK LogRetention singleton default policy is CDK-managed — cannot be changed.',
+        appliesTo: ['Resource::*'],
+      },
+      // fn-logs: log group ARN wildcards (resolved to literal region/account at synth)
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'Log group ARN wildcards for /sfc/launch-packages/* are required to read log streams across all SFC edge device log groups.',
+        appliesTo: [
+          `Resource::arn:aws:logs:${this.region}:${this.account}:log-group:/sfc/launch-packages/*`,
+          `Resource::arn:aws:logs:${this.region}:${this.account}:log-group:/sfc/launch-packages/*:*`,
+        ],
+      },
+      // fn-iot-control: IoT topic wildcard (resolved to literal region/account at synth)
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'IoT topic ARN wildcard sfc/*/control/* is required to publish runtime control messages to any registered SFC device.',
+        appliesTo: [
+          `Resource::arn:aws:iot:${this.region}:${this.account}:topic/sfc/*/control/*`,
+        ],
+      },
+    ]);
   }
 }

@@ -34,6 +34,7 @@ import {
 } from 'aws-cdk-lib';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { Construct } from 'constructs';
+import { NagSuppressions } from 'cdk-nag';
 import { UiHosting } from './constructs/ui-hosting';
 
 export interface UiStackProps extends NestedStackProps {
@@ -141,8 +142,8 @@ export class UiStack extends NestedStack {
           },
           pre_build: {
             commands: [
-              // Resolve CF domain from SSM — plain literal param name, zero CFN dep edge
-              // --region uses the explicitly injected DEPLOY_REGION env var (set at synth time)
+              // Wait 5 minutes for the SSM parameter to be written by CloudFormation
+              'echo "Waiting 300s for SSM param to be available..."; sleep 300',
               'CF_DOMAIN=$(aws ssm get-parameter --name "$CF_DOMAIN_SSM_PARAM" --region "$DEPLOY_REGION" --query "Parameter.Value" --output text)',
               'export VITE_COGNITO_REDIRECT_URI="https://$CF_DOMAIN/"',
               'echo "CF redirect URI: $VITE_COGNITO_REDIRECT_URI"',
@@ -220,5 +221,23 @@ def send(event, context, status, data, physical_id):
       serviceToken: triggerFn.functionArn,
       properties: { ProjectName: uiBuildProject.projectName, BuildVersion: '1' },
     });
+
+    // ── CDK Nag Suppressions ──────────────────────────────────────────
+
+    // UI build IAM role — logs wildcard required for CodeBuild log streaming
+    NagSuppressions.addResourceSuppressions(uiBuildRole, [
+      { id: 'AwsSolutions-IAM5', reason: 'logs:CreateLogGroup/CreateLogStream/PutLogEvents require wildcard resources for CodeBuild log streaming.' },
+    ], true);
+
+    // UI CodeBuild project — KMS CMK not required for this sample
+    NagSuppressions.addResourceSuppressions(uiBuildProject, [
+      { id: 'AwsSolutions-CB4', reason: 'KMS CMK encryption not required for the UI build project in this sample.' },
+    ]);
+
+    // UI build trigger Lambda — basic execution role + Python 3.12 are intentional
+    NagSuppressions.addResourceSuppressions(triggerFn, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for this simple CodeBuild trigger function.' },
+      { id: 'AwsSolutions-L1', reason: 'Python 3.12 is the intentional runtime for this trigger Lambda.' },
+    ], true);
   }
 }

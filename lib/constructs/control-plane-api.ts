@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { CfnOutput, Duration, Fn, Stack } from 'aws-cdk-lib';
+import { NagSuppressions } from 'cdk-nag';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -437,6 +438,93 @@ export class ControlPlaneApi extends Construct {
       ),
       description: 'Cognito Hosted UI base URL (used by the UI for PKCE login redirects)',
     });
+
+    // ── CDK Nag Suppressions ────────────────────────────────────────────
+
+    // Cognito User Pool — MFA and advanced security not required for this sample
+    NagSuppressions.addResourceSuppressions(this.userPool, [
+      { id: 'AwsSolutions-COG2', reason: 'MFA not required for this internal control plane sample — email-based account recovery is sufficient.' },
+      { id: 'AwsSolutions-COG3', reason: 'Cognito advanced security (threat protection) not required for this sample.' },
+    ]);
+
+    // All control-plane Lambda functions — basic execution role + Python 3.12 are intentional
+    const allFunctions = [
+      this.fnConfigs, this.fnLaunchPkg, this.fnIotProv, this.fnLogs,
+      this.fnGgComp, this.fnIotControl, this.fnAgentCreateConfig,
+      this.fnAgentRemediate, this.fnTagExtract, this.fnMetrics, this.fnAuthorizer,
+    ];
+    for (const fn of allFunctions) {
+      NagSuppressions.addResourceSuppressions(fn, [
+        { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for all control-plane Lambda functions.' },
+        { id: 'AwsSolutions-L1', reason: 'Python 3.12 is the intentional pinned runtime for all control-plane Lambda functions.' },
+      ], true);
+    }
+
+    // fn-gg-comp — Greengrass CreateComponentVersion does not support resource-level ARNs
+    NagSuppressions.addResourceSuppressions(this.fnGgComp, [
+      { id: 'AwsSolutions-IAM5', reason: 'greengrass:CreateComponentVersion does not support resource-level ARN scoping.' },
+    ], true);
+
+    // fn-metrics — CloudWatch metrics APIs require wildcard resources
+    NagSuppressions.addResourceSuppressions(this.fnMetrics, [
+      { id: 'AwsSolutions-IAM5', reason: 'cloudwatch:ListMetrics and GetMetricData require wildcard resources — no resource-level scoping supported.' },
+    ], true);
+
+    // fn-tag-extract — Bedrock InvokeModel requires wildcard; model ARN not known at deploy time
+    NagSuppressions.addResourceSuppressions(this.fnTagExtract, [
+      { id: 'AwsSolutions-IAM5', reason: 'bedrock:InvokeModel requires wildcard resources — model ARN is selected at runtime, not known at deploy time.' },
+    ], true);
+
+    // fn-agent-create-config, fn-agent-remediate — AgentCore runtime ID not known until after first deploy
+    NagSuppressions.addResourceSuppressions(this.fnAgentCreateConfig, [
+      { id: 'AwsSolutions-IAM5', reason: 'bedrock-agentcore:InvokeAgentRuntime requires wildcard — AgentCore runtime ID is not known at CDK deploy time.' },
+    ], true);
+    NagSuppressions.addResourceSuppressions(this.fnAgentRemediate, [
+      { id: 'AwsSolutions-IAM5', reason: 'bedrock-agentcore:InvokeAgentRuntime requires wildcard — AgentCore runtime ID is not known at CDK deploy time.' },
+    ], true);
+
+    // fn-iot-prov, fn-launch-pkg — IoT provisioning requires dynamic thing/cert/IAM role creation
+    NagSuppressions.addResourceSuppressions(this.fnIotProv, [
+      { id: 'AwsSolutions-IAM5', reason: 'IoT provisioning requires dynamic creation of IoT things, certificates, policies, and IAM roles — wildcard resources are required.' },
+    ], true);
+    NagSuppressions.addResourceSuppressions(this.fnLaunchPkg, [
+      { id: 'AwsSolutions-IAM5', reason: 'Launch package assembly reuses IoT provisioning permissions that require dynamic resource creation with wildcard ARNs.' },
+    ], true);
+
+    // CDK grant* methods (grantReadWrite, grantReadData, grantRead) generate DefaultPolicy
+    // entries with wildcard actions (s3:GetBucket*, s3:GetObject*, s3:List*, s3:Abort*,
+    // s3:DeleteObject*) and <Bucket.Arn>/* resource wildcards — these are CDK-generated and
+    // are the minimum required for the respective grant operations.
+    const grantWildcardAppliesTo = [
+      'Action::s3:GetBucket*',
+      'Action::s3:GetObject*',
+      'Action::s3:List*',
+      'Action::s3:Abort*',
+      'Action::s3:DeleteObject*',
+      'Resource::<SfcAgentArtifactsBucket0ECCD87F.Arn>/*',
+    ];
+    const ddbIndexWildcard = [
+      `Resource::<SfcConfigAgentInfraControlPlaneTablesLaunchPackageTable29C45052.Arn>/index/*`,
+    ];
+
+    for (const fn of allFunctions) {
+      NagSuppressions.addResourceSuppressions(fn, [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'CDK grant* methods generate DefaultPolicy wildcard S3 actions and <Bucket.Arn>/* — these are CDK-generated minimum permissions for the grant operations.',
+          appliesTo: grantWildcardAppliesTo,
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'CDK DynamoDB grantRead*/grantReadWriteData generates <Table.Arn>/index/* wildcard for GSI access — CDK-generated.',
+          appliesTo: ddbIndexWildcard,
+        },
+      ], true);
+    }
+
+    // Note: fn-logs log-group ARN wildcards and fn-iot-control IoT topic ARN wildcard are
+    // suppressed at stack level in sfc-control-plane-stack.ts because CDK Nag resolves
+    // region/account tokens to literal values at synth time — appliesTo here won't match.
   }
 
   // ── Private helpers ────────────────────────────────────────────────────

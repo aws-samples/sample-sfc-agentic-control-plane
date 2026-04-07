@@ -18,6 +18,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { Construct } from 'constructs';
+import { NagSuppressions } from 'cdk-nag';
 
 export interface UiHostingProps {
   /** The existing private S3 bucket that also holds agent artifacts.
@@ -179,5 +180,13 @@ export class UiHosting extends Construct {
       value: this.distributionUrl,
       description: 'SFC Control Plane UI — CloudFront URL',
     });
+
+    // ── CDK Nag Suppressions ──────────────────────────────────────────
+    NagSuppressions.addResourceSuppressions(this.distribution, [
+      { id: 'AwsSolutions-CFR1', reason: 'Geo-restriction not required — global access is intended for this sample.' },
+      { id: 'AwsSolutions-CFR2', reason: 'WAF integration not required for this sample internal control plane UI.' },
+      { id: 'AwsSolutions-CFR3', reason: 'CloudFront access logging not required for this sample.' },
+      { id: 'AwsSolutions-CFR4', reason: 'Default CloudFront certificate used — no custom domain is configured in this sample.' },
+    ]);
   }
 }

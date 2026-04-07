@@ -6,6 +6,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { NagSuppressions } from 'cdk-nag';
 import { LaunchPackageTables } from './launch-package-tables';
 import { ControlPlaneApi } from './control-plane-api';
 import { SfcHeartbeatRule } from './heartbeat-rule';
@@ -243,5 +244,21 @@ def handler(event, context):
     new CfnOutput(this, 'SfcConfigBucketName', { value: this.artifactsBucket.bucketName });
     new CfnOutput(this, 'SfcLaunchPackageTableName', { value: this.cpTables.launchPackageTable.tableName });
     new CfnOutput(this, 'SfcControlPlaneStateTableName', { value: this.cpTables.controlPlaneStateTable.tableName });
+
+    // ── CDK Nag Suppressions ──────────────────────────────────────────
+
+    // Memory handler Lambda — basic execution role + wildcard bedrock-agentcore needed
+    // before the memory resource ARN is known
+    NagSuppressions.addResourceSuppressions(memoryHandlerFn, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for this custom resource handler.' },
+      { id: 'AwsSolutions-IAM5', reason: 'bedrock-agentcore:CreateMemory/GetMemory/ListMemories require wildcard resources — no resource-level ARN is available before the memory is created.' },
+      { id: 'AwsSolutions-L1', reason: 'Python 3.12 is the intentional runtime for this custom resource handler.' },
+    ], true);
+
+    // Memory execution role — wildcard on foundation-model ARN is a pseudo-wildcard
+    // (Bedrock foundation model ARNs use account=:: format, not user-controllable)
+    NagSuppressions.addResourceSuppressions(this.memoryExecutionRole, [
+      { id: 'AwsSolutions-IAM5', reason: 'Foundation model ARN uses the standard arn:aws:bedrock:<region>::foundation-model/* pattern required by Bedrock.' },
+    ], true);
   }
 }
