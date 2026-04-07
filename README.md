@@ -43,7 +43,6 @@ SFC Agentic Control Plane
 ### 1. Deploy the CDK Stack
 
 ```bash
-cd SFC-AGENTIC-CONTROL-PLANE-STANDALONE
 npm install
 npx cdk deploy -c region=<YOUR_REGION>
 ```
@@ -563,7 +562,7 @@ Certificate revocation (`DELETE /packages/{packageId}/iot`) is available as a fi
 ## Project Structure
 
 ```
-SFC-AGENTIC-CONTROL-PLANE-STANDALONE/
+sample-sfc-agentic-control-plane/
 ├── README.md
 ├── cdk.json
 ├── package.json
@@ -662,7 +661,7 @@ VITE_COGNITO_REDIRECT_URI=http://localhost:5173/
 
 ```bash
 # Start the dev server
-cd SFC-AGENTIC-CONTROL-PLANE-STANDALONE/src/ui && npm install && npm run dev
+cd src/ui && npm install && npm run dev
 # → http://localhost:5173
 ```
 
