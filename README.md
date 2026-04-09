@@ -17,7 +17,6 @@ SFC Agentic Control Plane
     - [Phase 3 — Edge Deployment](#phase-3--edge-deployment)
     - [Phase 4 — Runtime Monitoring & Control](#phase-4--runtime-monitoring--control)
     - [Phase 5 — AI-Assisted Remediation](#phase-5--ai-assisted-remediation)
-- [Test the SFC Config Agent (AWS CLI)](#test-the-sfc-config-agent-aws-cli)
 - [Launch Packages](#launch-packages)
 - [Runtime Controls & Monitoring](#runtime-controls--monitoring)
 - [AI-Assisted Remediation](#ai-assisted-remediation)
@@ -29,12 +28,13 @@ SFC Agentic Control Plane
 - [Project Structure](#project-structure)
 - [Appendix — Local Development UI Setup](#appendix--local-development-ui-setup)
   - [ui/.env.local — required variables](#uienvlocal--required-variables)
+  - [Test the SFC Config Agent (AWS CLI)](#test-the-sfc-config-agent-aws-cli)
   - [Primary operator workflow](#primary-operator-workflow)
-- [Appendix — Text descriptions](#appendix---text-descriptions)
-  - [Executive Summary](#executive-summary)
-  - [Pitch](#pitch)
-  - [Abstract](#abstract)
-  - [Capabilities & Ideas](#capabilities--ideas)
+  - [Text descriptions](#text-descriptions)
+    - [Executive Summary](#executive-summary)
+    - [Pitch](#pitch)
+    - [Abstract](#abstract)
+    - [Capabilities & Ideas](#capabilities--ideas)
 
 ---
 
@@ -93,15 +93,21 @@ The SPA is fully served from CloudFront backed by an S3 bucket. The UI build is 
 **Create a user (admin — run after `cdk deploy`):**
 
 ```bash
-export AWS_REGION=<YOUR-REGION>
-export USER_POOL_ID=<CognitoUserPoolId>   # from cdk deploy output
-
-aws cognito-idp admin-create-user \
-  --user-pool-id "$USER_POOL_ID" \
-  --username user@example.com \
-  --user-attributes Name=email,Value=user@example.com Name=email_verified,Value=true \
-  --temporary-password "Temp1234!" \
-  --region "$AWS_REGION"
+cat > create-user.sh << 'EOF'
+#!/bin/bash
+read -p "User email: " USER_EMAIL
+read -p "Region [us-east-1]: " REGION
+REGION=${REGION:-us-east-1}
+TEMP_PASSWORD="TempPassword123!"
+POOL_ID=$(aws cloudformation describe-stacks --stack-name SfcAgenticControlPlaneStack --region "$REGION" --query 'Stacks[0].Outputs[?contains(OutputKey,`CognitoUserPoolId`)].OutputValue' --output text)
+[ -z "$POOL_ID" ] && echo "Error: Could not retrieve User Pool ID" && exit 1
+aws cognito-idp admin-create-user --user-pool-id "$POOL_ID" --username "$USER_EMAIL" --user-attributes Name=email,Value="$USER_EMAIL" Name=email_verified,Value=true --temporary-password "$TEMP_PASSWORD" --region "$REGION"
+echo ""
+echo "✓ User created successfully!"
+echo "  Username: $USER_EMAIL"
+echo "  Temporary password: $TEMP_PASSWORD"
+EOF
+chmod 755 create-user.sh && ./create-user.sh && rm -f create-user.sh
 ```
 
 **First login flow:**
@@ -116,66 +122,6 @@ aws cognito-idp admin-create-user \
 
 ---
 
-## Launch Packages
-
-A **Launch Package** is a self-contained zip assembled by the Control Plane — everything needed to run SFC on an edge host:
-
-```
-launch-package-{packageId}.zip
-├── sfc-config.json          # SFC config with IoT credential provider injected
-├── iot/                     # X.509 device cert, private key, Root CA, iot-config.json
-├── runner/                  # aws-sfc-runtime-agent (uv / Python 3.12)
-└── docker/                  # Optional Dockerfile + build script
-```
-
-**Run on the edge host:**
-
-```bash
-unzip launch-package-<id>.zip
-cd runner && uv run runner.py
-```
-
-The `aws-sfc-runtime-agent` handles IoT mTLS credential vending, SFC subprocess management, OTEL log shipping to CloudWatch, and the MQTT control channel back to the cloud.
-
----
-
-## Runtime Controls & Monitoring
-
-Once a package is `READY`, operators control the live edge device from the Package Detail view:
-
-| Control | Description |
-|---|---|
-| **Telemetry on/off** | Enable/disable OTEL CloudWatch log shipping |
-| **Diagnostics on/off** | Switch SFC log level to TRACE |
-| **Push Config Update** | Send a new config version to the edge over MQTT |
-| **Restart SFC** | Graceful SFC subprocess restart |
-
-A live **status LED** (green `ACTIVE` / red `ERROR` / grey `INACTIVE`) reflects device heartbeat, polled every 10 s.
-
----
-
-## AI-Assisted Remediation
-
-When ERROR-severity records appear in the log viewer:
-
-1. Click **"Fix with AI"** and select the error time window
-2. The backend invokes the **Bedrock AgentCore SFC Config Agent** with the error logs + current config
-3. A side-by-side diff of the corrected config is shown
-4. Click **"Create New Launch Package"** — deploys the fixed config as a new package
-
----
-
-## AI-Guided Config Generation
-
-From the Config Browser, operators can also trigger an AI-guided config creation workflow:
-
-1. Describe the machine, protocol, target AWS service, and data channels in natural language — or upload an existing spec file as context
-2. Optionally provide structured fields: protocol, host/port targets, sampling interval
-3. The agent calls the MCP server to load relevant SFC adapter and target documentation, generates a config, validates it, and saves it to S3/DynamoDB
-4. A job ID is returned immediately (HTTP 202); the UI polls `GET /configs/generate/{jobId}` until status is `COMPLETE`
-5. The new config appears in the Config Browser, ready to be set as Focus and packaged
-
----
 
 ## User Task & Action Sequence
 
@@ -459,30 +405,65 @@ sequenceDiagram
 
 ---
 
-## Test the SFC Config Agent (AWS CLI)
+## Launch Packages
 
-The agent runs as an **Amazon Bedrock AgentCore Runtime**. After deployment, retrieve the runtime ARN and invoke it:
+A **Launch Package** is a self-contained zip assembled by the Control Plane — everything needed to run SFC on an edge host:
+
+```
+launch-package-{packageId}.zip
+├── sfc-config.json          # SFC config with IoT credential provider injected
+├── iot/                     # X.509 device cert, private key, Root CA, iot-config.json
+├── runner/                  # aws-sfc-runtime-agent (uv / Python 3.12)
+└── docker/                  # Optional Dockerfile + build script
+```
+
+**Run on the edge host:**
 
 ```bash
-# 1. Get the AgentCore runtime ARN
-export AWS_REGION=<YOUR-REGION>
-AGENT_RUNTIME_ARN=$(aws bedrock-agentcore-control list-agent-runtimes \
-  --region $AWS_REGION \
-  --query "agentRuntimes[?agentRuntimeName=='sfc_config_agent'].agentRuntimeArn" \
-  --output text)
-
-echo '{"prompt": "Create an OPC-UA SFC config for a press machine with two data sources"}' > input.json
-
-# 2. Invoke the agent
-aws bedrock-agentcore invoke-agent-runtime \
-  --agent-runtime-arn "$AGENT_RUNTIME_ARN" \
-  --runtime-session-id "sfc-agent-my-session-01-20260225-0001" \
-  --payload fileb://input.json \
-  --region $AWS_REGION \
-  --cli-read-timeout 0 \
-  --cli-connect-timeout 0 \
-  output.txt && cat output.txt
+unzip launch-package-<id>.zip
+cd runner && uv run runner.py
 ```
+
+The `aws-sfc-runtime-agent` handles IoT mTLS credential vending, SFC subprocess management, OTEL log shipping to CloudWatch, and the MQTT control channel back to the cloud.
+
+---
+
+## Runtime Controls & Monitoring
+
+Once a package is `READY`, operators control the live edge device from the Package Detail view:
+
+| Control | Description |
+|---|---|
+| **Telemetry on/off** | Enable/disable OTEL CloudWatch log shipping |
+| **Diagnostics on/off** | Switch SFC log level to TRACE |
+| **Push Config Update** | Send a new config version to the edge over MQTT |
+| **Restart SFC** | Graceful SFC subprocess restart |
+
+A live **status LED** (green `ACTIVE` / red `ERROR` / grey `INACTIVE`) reflects device heartbeat, polled every 10 s.
+
+---
+
+## AI-Assisted Remediation
+
+When ERROR-severity records appear in the log viewer:
+
+1. Click **"Fix with AI"** and select the error time window
+2. The backend invokes the **Bedrock AgentCore SFC Config Agent** with the error logs + current config
+3. A side-by-side diff of the corrected config is shown
+4. Click **"Create New Launch Package"** — deploys the fixed config as a new package
+
+---
+
+## AI-Guided Config Generation
+
+From the Config Browser, operators can also trigger an AI-guided config creation workflow:
+
+1. Describe the machine, protocol, target AWS service, and data channels in natural language — or upload an existing spec file as context
+2. Optionally provide structured fields: protocol, host/port targets, sampling interval
+3. The agent calls the MCP server to load relevant SFC adapter and target documentation, generates a config, validates it, and saves it to S3/DynamoDB
+4. A job ID is returned immediately (HTTP 202); the UI polls `GET /configs/generate/{jobId}` until status is `COMPLETE`
+5. The new config appears in the Config Browser, ready to be set as Focus and packaged
+
 
 ---
 
@@ -665,6 +646,31 @@ cd src/ui && npm install && npm run dev
 # → http://localhost:5173
 ```
 
+### Test the SFC Config Agent (AWS CLI)
+
+The agent runs as an **Amazon Bedrock AgentCore Runtime**. After deployment, retrieve the runtime ARN and invoke it:
+
+```bash
+# 1. Get the AgentCore runtime ARN
+export AWS_REGION=<YOUR-REGION>
+AGENT_RUNTIME_ARN=$(aws bedrock-agentcore-control list-agent-runtimes \
+  --region $AWS_REGION \
+  --query "agentRuntimes[?agentRuntimeName=='sfc_config_agent'].agentRuntimeArn" \
+  --output text)
+
+echo '{"prompt": "Create an OPC-UA SFC config for a press machine with two data sources"}' > input.json
+
+# 2. Invoke the agent
+aws bedrock-agentcore invoke-agent-runtime \
+  --agent-runtime-arn "$AGENT_RUNTIME_ARN" \
+  --runtime-session-id "sfc-agent-my-session-01-20260225-0001" \
+  --payload fileb://input.json \
+  --region $AWS_REGION \
+  --cli-read-timeout 0 \
+  --cli-connect-timeout 0 \
+  output.txt && cat output.txt
+```
+
 ### Primary operator workflow
 
 ```
@@ -681,22 +687,22 @@ Browse Config → Edit (Monaco JSON) → Set as Focus → Create Launch Package 
 
 ---
 
-# Appendix — Text descriptions
+### Text descriptions
 
-## Executive Summary
+#### Executive Summary
 
 Connecting industrial equipment to cloud data pipelines is one of manufacturing's most persistent bottlenecks. The **SFC Agentic Control Plane** eliminates this barrier by combining a conversational AI assistant with a production-grade cloud control plane. Engineers describe what they need — in plain language or by uploading existing machine specs — and the agent produces a validated, deployment-ready Shop Floor Connectivity (SFC) configuration. That configuration is then packaged, cryptographically credentialed, and pushed to the edge in a single click. If the running process emits errors, a second AI step diagnoses the logs and proposes a corrected configuration automatically.
 
-## Pitch
+#### Pitch
 The SFC Agentic Control Plane eliminates the barrier of onboarding industrial equipment by combining an LLM Agent with a production-grade cloud control plane.
 
 ---
 
-## Abstract
+#### Abstract
 
 This solution wraps [AWS Shop Floor Connectivity (SFC)](https://github.com/awslabs/industrial-shopfloor-connect) — with an AI-driven lifecycle. The **SFC Config Agent** runs as an Amazon Bedrock AgentCore Runtime backed by Claude on Amazon Bedrock. It uses a purpose-built MCP server to validate configurations against the live SFC specification before saving them. A serverless **SFC Control Plane** (API Gateway + Lambda + DynamoDB + S3) stores versioned configs, assembles self-contained "Launch Packages" complete with AWS IoT X.509 credentials, and streams OpenTelemetry logs from the edge back to CloudWatch. A React/TypeScript single-page app (SPA) served via CloudFront ties all of this together into an operator-facing workflow that goes from an empty text box to a monitored, remotely-controllable edge process in minutes.
 
-## Capabilities & Ideas
+#### Capabilities & Ideas
 
 **The core idea** is that SFC configuration is expert knowledge that most OT engineers lack and most IT teams don't have time to acquire. By grounding an LLM in the actual SFC specification — via an MCP server that reads directly from the SFC GitHub repository — the agent generates correct-by-construction configs rather than plausible-looking but broken JSON. Every generated config is validated by the same MCP tools before it is persisted, creating a tight correctness loop that does not rely on model memorization.
 

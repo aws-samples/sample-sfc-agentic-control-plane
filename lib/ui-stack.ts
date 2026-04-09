@@ -33,6 +33,7 @@ import {
   aws_ssm as ssm,
 } from 'aws-cdk-lib';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import { Provider } from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { NagSuppressions } from 'cdk-nag';
 import { UiHosting } from './constructs/ui-hosting';
@@ -76,7 +77,7 @@ export class UiStack extends NestedStack {
     // Storing as SSM (not CFN token) keeps the CodeBuild project free of
     // any CFN dependency edge back to the CloudFront distribution.
     const cfDomainSsmParamName = '/sfc-config-agent/cf-distribution-domain';
-    new ssm.StringParameter(this, 'SfcCfDistributionDomainParam', {
+    const ssmParam = new ssm.StringParameter(this, 'SfcCfDistributionDomainParam', {
       parameterName: cfDomainSsmParamName,
       stringValue: uiHosting.distributionDomainName,
       description: 'CloudFront distribution domain for the SFC Control Plane UI',
@@ -142,8 +143,7 @@ export class UiStack extends NestedStack {
           },
           pre_build: {
             commands: [
-              // Wait 5 minutes for the SSM parameter to be written by CloudFormation
-              'echo "Waiting 300s for SSM param to be available..."; sleep 300',
+              // SSM parameter is guaranteed to be available by the Custom Resource check
               'CF_DOMAIN=$(aws ssm get-parameter --name "$CF_DOMAIN_SSM_PARAM" --region "$DEPLOY_REGION" --query "Parameter.Value" --output text)',
               'export VITE_COGNITO_REDIRECT_URI="https://$CF_DOMAIN/"',
               'echo "CF redirect URI: $VITE_COGNITO_REDIRECT_URI"',
@@ -177,50 +177,91 @@ export class UiStack extends NestedStack {
       cache: codebuild.Cache.local(codebuild.LocalCacheMode.CUSTOM),
     });
 
-    // ── Trigger Lambda — starts the CodeBuild job via CustomResource ──
-    const triggerFn = new lambda.Function(this, 'SfcUiBuildTriggerFn', {
+    // ── Unified Lambda — handles both onEvent and isComplete phases ───
+    // CloudFormation dependencies guarantee SSM parameter exists before this runs.
+    // Single Lambda eliminates duplicate code and reduces Lambda count.
+    const unifiedHandlerFn = new lambda.Function(this, 'SfcUiBuildHandlerFn', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      timeout: Duration.minutes(5),
+      timeout: Duration.minutes(2),
       code: lambda.Code.fromInline(`
-import boto3, json, urllib.request
+import boto3, json
 
 def handler(event, context):
     print(json.dumps(event))
-    if event['RequestType'] in ('Create', 'Update'):
-        cb = boto3.client('codebuild')
+    request_type = event.get('RequestType', '')
+    physical_id = event.get('PhysicalResourceId', '')
+    
+    # ═══ PHASE 1: onEvent (Create/Update/Delete) ═══
+    if request_type in ('Create', 'Update'):
+        # CloudFormation dependencies guarantee CloudFront distribution and
+        # SSM parameter are fully created before this Lambda is invoked.
+        # Start the build immediately - no need to check SSM parameter.
         project = event['ResourceProperties']['ProjectName']
-        try:
-            resp = cb.start_build(projectName=project)
-            build_id = resp['build']['id']
-            send(event, context, 'SUCCESS', {'BuildId': build_id}, build_id)
-        except Exception as e:
-            send(event, context, 'SUCCESS', {'Error': str(e)}, 'trigger-failed')
-    else:
-        send(event, context, 'SUCCESS', {}, event.get('PhysicalResourceId', 'trigger'))
-
-def send(event, context, status, data, physical_id):
-    body = json.dumps({
-        'Status': status, 'Reason': 'See CloudWatch', 'PhysicalResourceId': physical_id,
-        'StackId': event['StackId'], 'RequestId': event['RequestId'],
-        'LogicalResourceId': event['LogicalResourceId'], 'Data': data,
-    }).encode()
-    req = urllib.request.Request(event['ResponseURL'], data=body, method='PUT',
-        headers={'Content-Type': '', 'Content-Length': len(body)})
-    urllib.request.urlopen(req)
+        cb = boto3.client('codebuild')
+        resp = cb.start_build(projectName=project)
+        build_id = resp['build']['id']
+        print(f"Started build: {build_id}")
+        return {'PhysicalResourceId': build_id, 'Data': {'BuildId': build_id}}
+    
+    elif request_type == 'Delete':
+        # Delete — nothing to do
+        return {'PhysicalResourceId': physical_id or 'noop'}
+    
+    # ═══ PHASE 2: isComplete (Polling) ═══
+    if not physical_id:
+        return {'IsComplete': True}
+    
+    # Poll CodeBuild status
+    cb = boto3.client('codebuild')
+    resp = cb.batch_get_builds(ids=[physical_id])
+    builds = resp.get('builds', [])
+    if not builds:
+        print(f"Build {physical_id} not found yet, waiting...")
+        return {'IsComplete': False}
+    
+    build = builds[0]
+    status = build.get('buildStatus', 'IN_PROGRESS')
+    phase  = build.get('currentPhase', 'UNKNOWN')
+    print(f"Build {physical_id}: status={status}, phase={phase}")
+    
+    if status == 'SUCCEEDED':
+        return {'IsComplete': True, 'Data': {'BuildId': physical_id, 'Status': status}}
+    if status in ('FAILED', 'FAULT', 'STOPPED', 'TIMED_OUT'):
+        raise Exception(f"UI CodeBuild build {physical_id} ended with status: {status}")
+    return {'IsComplete': False}
 `),
     });
 
-    triggerFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['codebuild:StartBuild'],
+    unifiedHandlerFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['codebuild:StartBuild', 'codebuild:BatchGetBuilds'],
       resources: [uiBuildProject.projectArn],
     }));
 
-    // Fires after CloudFront + SSM param are fully provisioned in this nested stack
-    new CustomResource(this, 'SfcUiBuildTrigger', {
-      serviceToken: triggerFn.functionArn,
-      properties: { ProjectName: uiBuildProject.projectName, BuildVersion: '1' },
+    // ── Provider — wires unified handler for both phases ───────────────
+    // The CDK Provider framework uses a Step Functions state machine
+    // internally to orchestrate the polling (fully managed by CDK).
+    // The same Lambda is used for both onEvent and isComplete phases.
+    // cdk deploy will block until isComplete returns { IsComplete: true }.
+    const uiBuildProvider = new Provider(this, 'SfcUiBuildProvider', {
+      onEventHandler:   unifiedHandlerFn,
+      isCompleteHandler: unifiedHandlerFn,
+      queryInterval:    Duration.minutes(1),   // poll every 60 s
+      totalTimeout:     Duration.minutes(30),  // max wait (> CodeBuild 20 min timeout)
     });
+
+    // Fires after CloudFront + SSM param are fully provisioned in this nested stack.
+    // CloudFormation dependencies ensure resources are ready before Lambda invocation.
+    // cdk deploy will now loop here until the UI CodeBuild build completes.
+    const buildTrigger = new CustomResource(this, 'SfcUiBuildTrigger', {
+      serviceToken: uiBuildProvider.serviceToken,
+      properties: {
+        ProjectName: uiBuildProject.projectName,
+        BuildVersion: '1',  // Increment to force rebuild on updates
+      },
+    });
+    // Explicit dependency: CustomResource must wait for SSM parameter (which depends on CloudFront)
+    buildTrigger.node.addDependency(ssmParam);
 
     // ── CDK Nag Suppressions ──────────────────────────────────────────
 
@@ -234,10 +275,20 @@ def send(event, context, status, data, physical_id):
       { id: 'AwsSolutions-CB4', reason: 'KMS CMK encryption not required for the UI build project in this sample.' },
     ]);
 
-    // UI build trigger Lambda — basic execution role + Python 3.12 are intentional
-    NagSuppressions.addResourceSuppressions(triggerFn, [
-      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for this simple CodeBuild trigger function.' },
-      { id: 'AwsSolutions-L1', reason: 'Python 3.12 is the intentional runtime for this trigger Lambda.' },
+    // Unified Lambda handler — basic execution role + Python 3.12 are intentional
+    NagSuppressions.addResourceSuppressions(unifiedHandlerFn, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for this unified CodeBuild handler function.' },
+      { id: 'AwsSolutions-L1', reason: 'Python 3.12 is the intentional runtime for this Lambda.' },
+    ], true);
+
+    // Provider framework — CDK creates an internal Step Functions state machine
+    // and a framework Lambda; their roles and runtimes are CDK-managed.
+    NagSuppressions.addResourceSuppressions(uiBuildProvider, [
+      { id: 'AwsSolutions-IAM4', reason: 'CDK Provider framework uses AWSLambdaBasicExecutionRole for its internally-created Lambda — not user-controlled.' },
+      { id: 'AwsSolutions-IAM5', reason: 'CDK Provider framework generates wildcard permissions for its internal Step Functions state machine — not user-controlled.' },
+      { id: 'AwsSolutions-L1',   reason: 'CDK Provider framework Lambda runtime is CDK-managed and cannot be overridden.' },
+      { id: 'AwsSolutions-SF1',  reason: 'X-Ray tracing not required for the CDK Provider internal state machine in this sample.' },
+      { id: 'AwsSolutions-SF2',  reason: 'CDK Provider internal state machine does not require DLQ configuration in this sample.' },
     ], true);
   }
 }
