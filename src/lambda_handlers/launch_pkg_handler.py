@@ -148,6 +148,7 @@ def _create_package(body: dict) -> dict:
     # Build iot-config.json
     iot_config = {
         "iotEndpoint": prov["iotEndpoint"],
+        "iotDataEndpoint": prov["iotDataEndpoint"],
         "thingName": prov["thingName"],
         "roleAlias": prov["roleAliasName"],
         "region": _region,

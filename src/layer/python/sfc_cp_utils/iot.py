@@ -91,8 +91,9 @@ def provision_thing(package_id: str, region: str, sfc_config: dict | None = None
         alias_desc = iot.describe_role_alias(roleAlias=role_alias_name)
         role_alias_arn = alias_desc["roleAliasDescription"]["roleAliasArn"]
 
-    # 6. Resolve IoT credential endpoint
+    # 6. Resolve IoT credential endpoint + data (MQTT broker) endpoint
     iot_endpoint = get_iot_credential_endpoint(region)
+    iot_data_endpoint = get_iot_data_endpoint(region)
 
     # 7. Pre-create CloudWatch log group
     logs = boto3.client("logs", region_name=region)
@@ -111,6 +112,7 @@ def provision_thing(package_id: str, region: str, sfc_config: dict | None = None
         "roleAliasArn": role_alias_arn,
         "iamRoleArn": iam_role_arn,
         "iotEndpoint": iot_endpoint,
+        "iotDataEndpoint": iot_data_endpoint,
         "logGroupName": log_group_name,
     }
 

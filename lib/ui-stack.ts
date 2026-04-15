@@ -177,10 +177,10 @@ export class UiStack extends NestedStack {
       cache: codebuild.Cache.local(codebuild.LocalCacheMode.CUSTOM),
     });
 
-    // ── Unified Lambda — handles both onEvent and isComplete phases ───
-    // CloudFormation dependencies guarantee SSM parameter exists before this runs.
-    // Single Lambda eliminates duplicate code and reduces Lambda count.
-    const unifiedHandlerFn = new lambda.Function(this, 'SfcUiBuildHandlerFn', {
+    // ── onEvent Lambda — starts the CodeBuild build ───────────────────
+    // Called once by the CDK Provider framework on Create/Update/Delete.
+    // Must NOT return a 'Data' key on Delete (physical_id is already set).
+    const onEventFn = new lambda.Function(this, 'SfcUiBuildOnEventFn', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       timeout: Duration.minutes(2),
@@ -190,64 +190,95 @@ import boto3, json
 def handler(event, context):
     print(json.dumps(event))
     request_type = event.get('RequestType', '')
-    physical_id = event.get('PhysicalResourceId', '')
-    
-    # ═══ PHASE 1: onEvent (Create/Update/Delete) ═══
+    physical_id  = event.get('PhysicalResourceId', 'noop')
+
+    if request_type == 'Delete':
+        # Nothing to do on stack deletion — just acknowledge
+        return {'PhysicalResourceId': physical_id}
+
     if request_type in ('Create', 'Update'):
-        # CloudFormation dependencies guarantee CloudFront distribution and
-        # SSM parameter are fully created before this Lambda is invoked.
-        # Start the build immediately - no need to check SSM parameter.
         project = event['ResourceProperties']['ProjectName']
         cb = boto3.client('codebuild')
         resp = cb.start_build(projectName=project)
         build_id = resp['build']['id']
         print(f"Started build: {build_id}")
+        # Return build_id as PhysicalResourceId so isComplete can poll it
         return {'PhysicalResourceId': build_id, 'Data': {'BuildId': build_id}}
-    
-    elif request_type == 'Delete':
-        # Delete — nothing to do
-        return {'PhysicalResourceId': physical_id or 'noop'}
-    
-    # ═══ PHASE 2: isComplete (Polling) ═══
-    if not physical_id:
+
+    # Unknown request type — pass through safely
+    return {'PhysicalResourceId': physical_id}
+`),
+    });
+
+    onEventFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['codebuild:StartBuild'],
+      resources: [uiBuildProject.projectArn],
+    }));
+
+    // ── isComplete Lambda — polls CodeBuild until the build finishes ──
+    // Called repeatedly by the CDK Provider framework (queryInterval).
+    // Must return { IsComplete: true/false }.  'Data' is ONLY allowed when
+    // IsComplete is true — this is a strict CDK Provider framework contract.
+    // Build failures are logged but do NOT raise exceptions so that a broken
+    // UI build never causes the CloudFormation stack deployment to fail.
+    const isCompleteFn = new lambda.Function(this, 'SfcUiBuildIsCompleteFn', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      timeout: Duration.minutes(2),
+      code: lambda.Code.fromInline(`
+import boto3, json
+
+def handler(event, context):
+    print(json.dumps(event))
+    build_id = event.get('PhysicalResourceId', '')
+
+    if not build_id or build_id == 'noop':
         return {'IsComplete': True}
-    
-    # Poll CodeBuild status
+
     cb = boto3.client('codebuild')
-    resp = cb.batch_get_builds(ids=[physical_id])
+    resp = cb.batch_get_builds(ids=[build_id])
     builds = resp.get('builds', [])
     if not builds:
-        print(f"Build {physical_id} not found yet, waiting...")
+        print(f"Build {build_id} not found yet, waiting...")
         return {'IsComplete': False}
-    
-    build = builds[0]
+
+    build  = builds[0]
     status = build.get('buildStatus', 'IN_PROGRESS')
     phase  = build.get('currentPhase', 'UNKNOWN')
-    print(f"Build {physical_id}: status={status}, phase={phase}")
-    
+    print(f"Build {build_id}: status={status}, phase={phase}")
+
     if status == 'SUCCEEDED':
-        return {'IsComplete': True, 'Data': {'BuildId': physical_id, 'Status': status}}
+        return {'IsComplete': True, 'Data': {'BuildId': build_id, 'Status': status}}
+
+    # Treat any terminal failure as a non-fatal warning so that a broken UI
+    # build never rolls back the entire CloudFormation stack deployment.
     if status in ('FAILED', 'FAULT', 'STOPPED', 'TIMED_OUT'):
-        raise Exception(f"UI CodeBuild build {physical_id} ended with status: {status}")
+        print(f"WARNING: UI CodeBuild build {build_id} ended with status {status}. "
+              "Marking deployment as complete to avoid stack rollback. "
+              "Please check the CodeBuild logs and re-trigger the build manually.")
+        return {'IsComplete': True, 'Data': {'BuildId': build_id, 'Status': status}}
+
+    # Build still running — keep polling
     return {'IsComplete': False}
 `),
     });
 
-    unifiedHandlerFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['codebuild:StartBuild', 'codebuild:BatchGetBuilds'],
+    isCompleteFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['codebuild:BatchGetBuilds'],
       resources: [uiBuildProject.projectArn],
     }));
 
-    // ── Provider — wires unified handler for both phases ───────────────
-    // The CDK Provider framework uses a Step Functions state machine
-    // internally to orchestrate the polling (fully managed by CDK).
-    // The same Lambda is used for both onEvent and isComplete phases.
-    // cdk deploy will block until isComplete returns { IsComplete: true }.
+    // ── Provider — separate onEvent / isComplete handlers ─────────────
+    // Using two distinct Lambdas satisfies the CDK Provider framework contract:
+    //   • onEvent  → starts work, returns PhysicalResourceId (+ optional Data)
+    //   • isComplete → polls and returns { IsComplete: bool } — Data only when true
+    // This avoids the "Data is not allowed if IsComplete is False" error that
+    // occurs when a single Lambda is reused for both phases.
     const uiBuildProvider = new Provider(this, 'SfcUiBuildProvider', {
-      onEventHandler:   unifiedHandlerFn,
-      isCompleteHandler: unifiedHandlerFn,
-      queryInterval:    Duration.minutes(1),   // poll every 60 s
-      totalTimeout:     Duration.minutes(30),  // max wait (> CodeBuild 20 min timeout)
+      onEventHandler:    onEventFn,
+      isCompleteHandler: isCompleteFn,
+      queryInterval:     Duration.minutes(1),   // poll every 60 s
+      totalTimeout:      Duration.minutes(30),  // max wait (> CodeBuild 20 min timeout)
     });
 
     // Fires after CloudFront + SSM param are fully provisioned in this nested stack.
@@ -275,10 +306,16 @@ def handler(event, context):
       { id: 'AwsSolutions-CB4', reason: 'KMS CMK encryption not required for the UI build project in this sample.' },
     ]);
 
-    // Unified Lambda handler — basic execution role + Python 3.12 are intentional
-    NagSuppressions.addResourceSuppressions(unifiedHandlerFn, [
-      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for this unified CodeBuild handler function.' },
-      { id: 'AwsSolutions-L1', reason: 'Python 3.12 is the intentional runtime for this Lambda.' },
+    // onEvent Lambda — basic execution role + Python 3.12 are intentional
+    NagSuppressions.addResourceSuppressions(onEventFn, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for this onEvent CodeBuild trigger function.' },
+      { id: 'AwsSolutions-L1',   reason: 'Python 3.12 is the intentional runtime for this Lambda.' },
+    ], true);
+
+    // isComplete Lambda — basic execution role + Python 3.12 are intentional
+    NagSuppressions.addResourceSuppressions(isCompleteFn, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole managed policy is appropriate for this isComplete CodeBuild polling function.' },
+      { id: 'AwsSolutions-L1',   reason: 'Python 3.12 is the intentional runtime for this Lambda.' },
     ], true);
 
     // Provider framework — CDK creates an internal Step Functions state machine

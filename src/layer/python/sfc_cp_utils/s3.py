@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 import boto3
+from botocore.config import Config as BotocoreConfig
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +89,25 @@ def generate_presigned_url(bucket: str, s3_key: str, ttl_seconds: int = 300) -> 
     """
     Generate a pre-signed GET URL for the given S3 object.
     Default TTL: 5 minutes (used for config-update control messages).
+
+    A fresh client is created on every call with:
+    - explicit region_name  — avoids falling back to the global S3 endpoint
+    - endpoint_url pinned   — ensures the signed Host header matches the URL
+                              the browser actually navigates to (regional endpoint)
+    - signature_version=s3v4 — required for all regions other than us-east-1
+                               and mandatory when an endpoint_url is supplied
+
+    Without these settings boto3 can sign against the global endpoint while the
+    URL resolves to the regional one, causing SignatureDoesNotMatch.
     """
-    return _client().generate_presigned_url(
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    client = boto3.client(
+        "s3",
+        region_name=region,
+        endpoint_url=f"https://s3.{region}.amazonaws.com",
+        config=BotocoreConfig(signature_version="s3v4"),
+    )
+    return client.generate_presigned_url(
         "get_object",
         Params={"Bucket": bucket, "Key": s3_key},
         ExpiresIn=ttl_seconds,

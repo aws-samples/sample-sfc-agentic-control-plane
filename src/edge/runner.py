@@ -208,6 +208,48 @@ def _ensure_sfc_artifacts(version: str, sfc_cfg: dict, sfc_bin_dir: Path) -> Pat
 # 2. IoT credential vending
 # ─────────────────────────────────────────────────────────────────────────────
 
+_MAX_CLOCK_SKEW_S = 270  # exit threshold in seconds
+
+
+def _check_clock_skew(server_date_header: str) -> None:
+    """
+    Compare the HTTP Date header returned by AWS with the local clock.
+    Exits immediately with a clear remediation message if the skew exceeds
+    _MAX_CLOCK_SKEW_S seconds.
+    """
+    try:
+        import email.utils
+        server_ts = email.utils.parsedate_to_datetime(server_date_header)
+        local_ts = datetime.now(timezone.utc)
+        skew_s = (local_ts - server_ts).total_seconds()
+        if abs(skew_s) > _MAX_CLOCK_SKEW_S:
+            direction = "ahead of" if skew_s > 0 else "behind"
+            msg = (
+                f"FATAL CLOCK SKEW: local clock is {abs(skew_s):.0f} s {direction} AWS "
+                f"server time. "
+                "AWS API calls will be rejected with InvalidSignatureException. "
+                "Sync your system clock and restart the runner.\n"
+                "  Windows (elevated CMD): w32tm /resync /force\n"
+                "  Linux:                 sudo ntpdate -u pool.ntp.org  "
+                "or  sudo timedatectl set-ntp true\n"
+                "  macOS:                 sudo sntp -sS pool.ntp.org"
+            )
+            logger.error(msg)
+            sys.exit(1)
+        elif abs(skew_s) > 60:
+            direction = "ahead of" if skew_s > 0 else "behind"
+            logger.warning(
+                "Clock skew detected: local clock is %.0f s %s AWS server time. "
+                "Large skew will cause AWS API calls to fail.",
+                abs(skew_s),
+                direction,
+            )
+    except SystemExit:
+        raise
+    except Exception:
+        pass  # Non-fatal — best-effort check only
+
+
 def _fetch_credentials(iot_cfg: dict) -> dict:
     """Fetch temporary AWS credentials from IoT credential provider endpoint."""
     url = _CREDENTIAL_ENDPOINT_TEMPLATE.format(
@@ -221,6 +263,9 @@ def _fetch_credentials(iot_cfg: dict) -> dict:
     ctx.load_cert_chain(certfile=str(_CERT_PATH), keyfile=str(_KEY_PATH))
     ctx.load_verify_locations(cafile=str(_CA_PATH))
     with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+        # Check clock skew using the authoritative AWS server Date header.
+        # Exits with a clear message if skew is too large for AWS to accept.
+        _check_clock_skew(resp.headers.get("Date", ""))
         data = json.loads(resp.read())
     creds = data["credentials"]
     logger.info(
@@ -533,6 +578,35 @@ def _emit_otel_log(line: str) -> None:
 # 5. MQTT5 control channel
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _resolve_mqtt_endpoint(iot_cfg: dict) -> str:
+    """
+    Return the IoT MQTT broker (Data-ATS) endpoint.
+
+    Preference order:
+      1. ``iotDataEndpoint`` key baked into iot-config.json at package creation
+         time (present in packages created after the DNS-fix).  This avoids any
+         runtime AWS API call and works reliably on all OSes, including Windows
+         where the awscrt native DNS resolver can fail during process startup.
+      2. Fallback (older packages): if ``iotEndpoint`` already looks like a
+         data endpoint use it directly; otherwise call describe_endpoint via
+         boto3 (requires ``iot:DescribeEndpoint`` IAM permission).
+    """
+    data_ep = iot_cfg.get("iotDataEndpoint")
+    if data_ep:
+        return data_ep
+
+    # Backward-compatibility path for packages created before this fix
+    raw_ep = iot_cfg["iotEndpoint"]
+    if "credentials.iot" in raw_ep:
+        import boto3
+        data_ep = boto3.client("iot", region_name=iot_cfg["region"]).describe_endpoint(
+            endpointType="iot:Data-ATS"
+        )["endpointAddress"]
+    else:
+        data_ep = raw_ep
+    return data_ep
+
+
 def _connect_mqtt(iot_cfg: dict):
     """Connect to IoT broker via mTLS and subscribe to control topics."""
     global _mqtt_connection
@@ -540,14 +614,7 @@ def _connect_mqtt(iot_cfg: dict):
         from awsiot import mqtt_connection_builder
         from awscrt.mqtt import QoS as MqttQoS
 
-        # Use data endpoint if it looks like a credentials endpoint
-        if "credentials.iot" in iot_cfg["iotEndpoint"]:
-            import boto3
-            data_ep = boto3.client("iot", region_name=iot_cfg["region"]).describe_endpoint(
-                endpointType="iot:Data-ATS"
-            )["endpointAddress"]
-        else:
-            data_ep = iot_cfg["iotEndpoint"]
+        data_ep = _resolve_mqtt_endpoint(iot_cfg)
 
         conn = mqtt_connection_builder.mtls_from_path(
             endpoint=data_ep,
@@ -576,6 +643,34 @@ def _connect_mqtt(iot_cfg: dict):
     except Exception as exc:
         logger.error("MQTT connection failed: %s", exc)
         return None
+
+
+def _mqtt_reconnect_loop(iot_cfg: dict) -> None:
+    """
+    Background thread: re-attempt MQTT connection whenever it is absent.
+
+    Uses exponential back-off (15 s → 30 s → 60 s → 120 s, capped) so
+    transient startup failures (e.g. Windows awscrt DNS initialisation race)
+    self-heal without flooding the logs.
+    """
+    global _mqtt_connection
+    backoff = 15
+    max_backoff = 120
+    while not _shutdown.is_set():
+        _shutdown.wait(timeout=backoff)
+        if _shutdown.is_set():
+            break
+        if _mqtt_connection is not None:
+            # Connection is healthy; reset back-off and keep watching
+            backoff = 15
+            continue
+        logger.info("MQTT not connected — attempting reconnect (next retry in %ds if this fails) …", min(backoff * 2, max_backoff))
+        conn = _connect_mqtt(iot_cfg)
+        if conn is not None:
+            logger.info("MQTT reconnected successfully")
+            backoff = 15
+        else:
+            backoff = min(backoff * 2, max_backoff)
 
 
 def _dispatch_control(topic: str, payload: bytes, iot_cfg: dict) -> None:
@@ -838,8 +933,17 @@ def main() -> None:
     )
     output_thread.start()
 
-    # Step 5: Connect MQTT control channel
+    # Step 5: Connect MQTT control channel (best-effort; reconnect loop handles failures)
     _connect_mqtt(iot_cfg)
+
+    # Step 5b: Start MQTT reconnect loop — self-heals transient DNS/connect failures
+    mqtt_reconnect_thread = threading.Thread(
+        target=_mqtt_reconnect_loop,
+        args=(iot_cfg,),
+        daemon=True,
+        name="mqtt-reconnect",
+    )
+    mqtt_reconnect_thread.start()
 
     # Step 6: Start heartbeat publisher
     hb_thread = threading.Thread(
