@@ -162,12 +162,14 @@ export function isAuthenticated(): boolean {
  * authorizer server-side; this is display-only.
  */
 export interface UserInfo {
-  /** Cognito username (sub claim) */
+  /** Cognito sub (stable user identifier — used as owner key in the backend) */
   sub: string;
-  /** Email address (if the email scope was requested) */
+  /** Email address */
   email?: string;
   /** Cognito preferred_username */
   username?: string;
+  /** Cognito group memberships, e.g. ["global-read"] or ["global-write"] */
+  groups: string[];
 }
 
 export function getUser(): UserInfo | null {
@@ -175,7 +177,6 @@ export function getUser(): UserInfo | null {
   if (!token) return null;
   try {
     const payload = token.split(".")[1];
-    // Pad base64url → standard base64 before decoding
     const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
     const json = decodeURIComponent(
       atob(padded)
@@ -183,11 +184,14 @@ export function getUser(): UserInfo | null {
         .map((c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0"))
         .join("")
     );
-    const claims = JSON.parse(json) as Record<string, string>;
+    const claims = JSON.parse(json) as Record<string, unknown>;
     return {
-      sub: claims["sub"] ?? "",
-      email: claims["email"],
-      username: claims["cognito:username"] ?? claims["preferred_username"],
+      sub: (claims["sub"] as string) ?? "",
+      email: claims["email"] as string | undefined,
+      username:
+        (claims["cognito:username"] as string | undefined) ??
+        (claims["preferred_username"] as string | undefined),
+      groups: (claims["cognito:groups"] as string[] | undefined) ?? [],
     };
   } catch {
     return null;

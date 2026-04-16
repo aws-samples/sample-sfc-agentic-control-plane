@@ -30,12 +30,16 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import boto3
+from sfc_cp_utils import ddb as ddb_util, auth as auth_util
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 _region = os.environ.get("AWS_REGION", "us-east-1")
 _cw = boto3.client("cloudwatch", region_name=_region)
+_dynamodb = boto3.resource("dynamodb")
+LAUNCH_PKG_TABLE = os.environ.get("LAUNCH_PKG_TABLE_NAME", "")
+_pkg_table = _dynamodb.Table(LAUNCH_PKG_TABLE) if LAUNCH_PKG_TABLE else None
 
 _SFC_NAMESPACE = "SFC"
 _DEFAULT_LOOKBACK_MINUTES = 15
@@ -65,6 +69,13 @@ def handler(event: dict, context) -> dict:
     package_id = path_params.get("packageId")
     if not package_id:
         return _error(400, "BAD_REQUEST", "Missing packageId path parameter")
+
+    if _pkg_table:
+        pkg = ddb_util.get_package(_pkg_table, package_id)
+        if pkg:
+            caller_sub, caller_groups = auth_util.caller(event)
+            if not auth_util.can_read(pkg.get("owner"), caller_sub, caller_groups):
+                return _error(403, "FORBIDDEN", "You do not have permission to access metrics for this package")
 
     body = _parse_body(event)
     lookback = min(

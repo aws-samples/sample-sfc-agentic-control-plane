@@ -4,7 +4,7 @@ from __future__ import annotations
 import json, logging, os, re
 from datetime import datetime, timezone
 import boto3
-from sfc_cp_utils import ddb as ddb_util
+from sfc_cp_utils import ddb as ddb_util, auth as auth_util
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -38,6 +38,9 @@ def handler(event: dict, context) -> dict:
         pkg = ddb_util.get_package(_pkg_table, package_id)
         if not pkg:
             return _error(404, "NOT_FOUND", f"Package {package_id} not found")
+        caller_sub, caller_groups = auth_util.caller(event)
+        if not auth_util.can_read(pkg.get("owner"), caller_sub, caller_groups):
+            return _error(403, "FORBIDDEN", "You do not have permission to access logs for this package")
         log_group = pkg.get("logGroupName", f"/sfc/launch-packages/{package_id}")
         # Check log group exists
         if pkg.get("status") == "PROVISIONING":

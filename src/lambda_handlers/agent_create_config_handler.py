@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 import boto3
 
-from sfc_cp_utils import s3 as s3_util
+from sfc_cp_utils import s3 as s3_util, auth as auth_util
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

@@ -20,13 +20,19 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// ── Response interceptor — re-authenticate on 401 ────────────────────────────
+// ── Response interceptor — re-authenticate on 401, surface 403 ───────────────
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error?.response?.status === 401) {
       // Token expired or invalid — re-trigger PKCE login
       void login();
+    }
+    if (error?.response?.status === 403) {
+      // Dispatch a custom DOM event so any mounted listener can show a modal
+      const message: string =
+        error.response?.data?.message ?? "You are not authorised to perform this action.";
+      window.dispatchEvent(new CustomEvent("api:forbidden", { detail: { message } }));
     }
     return Promise.reject(error);
   }
@@ -42,6 +48,10 @@ export interface ConfigItem {
   s3Key?: string;
   status: "active" | "archived";
   createdAt: string;
+  /** Cognito sub of the user who created this config */
+  owner?: string;
+  /** Email of the user who created this config */
+  ownerEmail?: string;
 }
 
 export interface FocusState {
@@ -70,6 +80,10 @@ export interface LaunchPackage {
   lastRestartAt?: string;
   lastHeartbeatAt?: string;
   sfcRunning?: boolean;
+  /** Cognito sub of the user who created this package */
+  owner?: string;
+  /** Email of the user who created this package */
+  ownerEmail?: string;
 }
 
 export interface HeartbeatStatus {

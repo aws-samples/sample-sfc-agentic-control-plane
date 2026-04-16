@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 import boto3
 from boto3.dynamodb.conditions import Key
 
-from sfc_cp_utils import ddb as ddb_util, s3 as s3_util
+from sfc_cp_utils import ddb as ddb_util, s3 as s3_util, auth as auth_util
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -102,7 +102,7 @@ def _ddb_put_config(item: dict) -> None:
 
 
 def handler(event: dict, context) -> dict:
-    # Background job execution path (self-invoked asynchronously)
+    # Background job execution path (self-invoked asynchronously) — no auth needed
     if "__session_id" in event:
         return _run_background_job(event)
 
@@ -110,18 +110,26 @@ def handler(event: dict, context) -> dict:
     path_params = event.get("pathParameters") or {}
     package_id = path_params.get("packageId")
     session_id = path_params.get("sessionId")
+    caller_sub, caller_groups = auth_util.caller(event)
 
     try:
         pkg = ddb_util.get_package(_pkg_table, package_id)
         if not pkg:
             return _error(404, "NOT_FOUND", f"Package {package_id} not found")
 
-        if method == "POST" and not session_id:
-            body = _parse_body(event)
-            return _trigger_remediation(pkg, body)
+        # Both triggering and polling require at minimum read access to the package
+        if not auth_util.can_read(pkg.get("owner"), caller_sub, caller_groups):
+            return _error(403, "FORBIDDEN", "You do not have permission to access this package")
 
         if method == "GET" and session_id:
             return _get_session_status(session_id)
+
+        # Triggering a new remediation is a write action (creates a new config version)
+        if method == "POST" and not session_id:
+            if not auth_util.can_write(pkg.get("owner"), caller_sub, caller_groups):
+                return _error(403, "FORBIDDEN", "You do not have permission to trigger remediation for this package")
+            body = _parse_body(event)
+            return _trigger_remediation(pkg, body)
 
         return _error(404, "NOT_FOUND", "Route not matched")
     except Exception as exc:

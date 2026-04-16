@@ -4,7 +4,7 @@ from __future__ import annotations
 import json, logging, os
 from datetime import datetime, timezone
 import boto3
-from sfc_cp_utils import ddb as ddb_util, s3 as s3_util
+from sfc_cp_utils import ddb as ddb_util, s3 as s3_util, auth as auth_util
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -24,15 +24,25 @@ def handler(event: dict, context) -> dict:
     path = event.get("rawPath", "")
     path_params = event.get("pathParameters") or {}
     package_id = path_params.get("packageId")
+    caller_sub, caller_groups = auth_util.caller(event)
     try:
         pkg = ddb_util.get_package(_pkg_table, package_id)
         if not pkg:
             return _error(404, "NOT_FOUND", f"Package {package_id} not found")
 
+        # All read endpoints require at least read permission
+        if not auth_util.can_read(pkg.get("owner"), caller_sub, caller_groups):
+            return _error(403, "FORBIDDEN", "You do not have permission to access this package")
+
         if path.endswith("/heartbeat") and method == "GET":
             return _get_heartbeat(pkg)
         if path.endswith("/control") and method == "GET":
             return _get_control_state(pkg)
+
+        # Write/mutation endpoints require write permission
+        if not auth_util.can_write(pkg.get("owner"), caller_sub, caller_groups):
+            return _error(403, "FORBIDDEN", "You do not have permission to control this package")
+
         if path.endswith("/diagnostics") and method == "PUT":
             return _set_toggle(pkg, "diagnostics", _parse_body(event))
         if path.endswith("/config-update") and method == "POST":

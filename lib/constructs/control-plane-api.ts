@@ -85,6 +85,19 @@ export class ControlPlaneApi extends Construct {
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
     });
 
+    // ── Cognito Groups for cross-user access ──────────────────────────────────
+    // Assign users via: aws cognito-idp admin-add-user-to-group --group-name global-read|global-write
+    new cognito.CfnUserPoolGroup(this, 'GlobalReadGroup', {
+      userPoolId: this.userPool.userPoolId,
+      groupName: 'global-read',
+      description: "Read any user's configs and packages",
+    });
+    new cognito.CfnUserPoolGroup(this, 'GlobalWriteGroup', {
+      userPoolId: this.userPool.userPoolId,
+      groupName: 'global-write',
+      description: "Read and write any user's configs and packages",
+    });
+
     // Hosted UI domain (prefix must be globally unique — use account+region)
     this.userPool.addDomain('SfcCpHostedUiDomain', {
       cognitoDomain: {
@@ -257,6 +270,7 @@ export class ControlPlaneApi extends Construct {
 
     // ── WP-metrics — fn-metrics ────────────────────────────────────────
     this.fnMetrics = mkFn('fn-metrics', 'metrics_handler', 256, 30);
+    launchPackageTable.grantReadData(this.fnMetrics);
     this.fnMetrics.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['cloudwatch:ListMetrics', 'cloudwatch:GetMetricData'],

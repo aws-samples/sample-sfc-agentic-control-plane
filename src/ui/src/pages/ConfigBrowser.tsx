@@ -16,7 +16,31 @@ import SortableHeader from "../components/SortableHeader";
 import TagFilter from "../components/TagFilter";
 import AiConfigWizard from "../components/AiConfigWizard";
 import { useSortable } from "../hooks/useSortable";
+import { usePermissions } from "../hooks/usePermissions";
+import { getUser } from "../auth";
 import { useState, useMemo, useRef, useEffect } from "react";
+
+/** Subtle "who created" chip — shows "you", email, or truncated sub. */
+function OwnerChip({ owner, ownerEmail }: { owner?: string; ownerEmail?: string }) {
+  if (!owner) return null;
+  const user = getUser();
+  const isMe = user?.sub === owner;
+  const display = isMe ? "you" : (ownerEmail || owner.slice(0, 8) + "…");
+  const title = isMe
+    ? `Created by you (${ownerEmail || owner})`
+    : `Created by ${ownerEmail || owner}`;
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 text-[10px] text-slate-500 mt-0.5"
+      title={title}
+    >
+      <svg viewBox="0 0 24 24" className="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+      </svg>
+      {display}
+    </span>
+  );
+}
 
 // ─── DeployedVersionBadge ─────────────────────────────────────────────────────
 // Shows "vN deployed" where N is the version label of the currently deployed version.
@@ -79,6 +103,7 @@ type ConfigRow = {
   status: string;
   createdAt: string;
   tags?: string[];
+  owner?: string;
 };
 
 function getValue(item: ConfigRow, column: string): string | number | undefined {
@@ -96,6 +121,7 @@ function getValue(item: ConfigRow, column: string): string | number | undefined 
 export default function ConfigBrowser() {
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const { canWrite } = usePermissions();
 
   const { data: rawConfigs, isLoading, refetch: refetchConfigs, isFetching: isFetchingConfigs } = useQuery({
     queryKey: ["configs"],
@@ -301,11 +327,22 @@ export default function ConfigBrowser() {
                         return <StatusBadge status={derived} />;
                       })()}
                     </td>
-                    <td className="text-xs text-slate-500">{new Date(c.createdAt).toLocaleDateString()}</td>
+                    <td className="text-xs text-slate-500">
+                      <div className="flex flex-col">
+                        {new Date(c.createdAt).toLocaleDateString()}
+                        <OwnerChip owner={c.owner} ownerEmail={(c as { ownerEmail?: string }).ownerEmail} />
+                      </div>
+                    </td>
                     <td className="flex items-center gap-1">
-                      <button className="btn btn-ghost text-xs" onClick={(e) => { e.stopPropagation(); navigate(`/configs/${c.configId}`); }}>Edit</button>
+                      {canWrite(c.owner) ? (
+                        <button className="btn btn-ghost text-xs" onClick={(e) => { e.stopPropagation(); navigate(`/configs/${c.configId}`); }}>Edit</button>
+                      ) : (
+                        <span className="btn btn-ghost text-xs text-slate-600 cursor-not-allowed opacity-50" title="You do not have permission to edit this config">Edit</span>
+                      )}
                       {!isFocused && (
-                        usedConfigIds.has(c.configId) ? (
+                        !canWrite(c.owner) ? (
+                          <span title="You do not have permission to delete this config" className="btn btn-ghost text-xs text-slate-600 cursor-not-allowed opacity-50" onClick={(e) => e.stopPropagation()}>Delete</span>
+                        ) : usedConfigIds.has(c.configId) ? (
                           <span title="Used by one or more launch packages — cannot be deleted." className="btn btn-ghost text-xs text-slate-600 cursor-not-allowed opacity-50" onClick={(e) => e.stopPropagation()}>Delete</span>
                         ) : (
                           <button className="btn btn-ghost text-xs text-red-400 hover:text-red-300" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ configId: c.configId, name: c.name }); }}>Delete</button>

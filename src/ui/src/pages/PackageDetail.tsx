@@ -15,6 +15,29 @@ import GgDeployDialog from "../components/GgDeployDialog";
 import TagEditor from "../components/TagEditor";
 import MetricsDashboard from "../components/MetricsDashboard";
 import { useState, useEffect, useRef } from "react";
+import { getUser } from "../auth";
+
+/** Render a subtle "who created" label — shows "you", email, or truncated sub. */
+function OwnerLabel({ owner, ownerEmail }: { owner?: string; ownerEmail?: string }) {
+  if (!owner) return null;
+  const user = getUser();
+  const isMe = user?.sub === owner;
+  const display = isMe ? "you" : (ownerEmail || owner.slice(0, 8) + "…");
+  const title = isMe
+    ? `Created by you (${ownerEmail || owner})`
+    : `Created by ${ownerEmail || owner}`;
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-[10px] text-slate-500"
+      title={title}
+    >
+      <svg viewBox="0 0 24 24" className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+      </svg>
+      {display}
+    </span>
+  );
+}
 
 export default function PackageDetail() {
   const { packageId } = useParams<{ packageId: string }>();
@@ -126,7 +149,13 @@ export default function PackageDetail() {
                 }
                 title="Open this exact config version in the editor"
               />
-              <Row label="Created" value={new Date(pkg.createdAt).toLocaleString()} />
+              <div className="flex items-start gap-2">
+                <span className="w-32 shrink-0 text-slate-500 text-xs pt-0.5">Created</span>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-xs text-slate-200">{new Date(pkg.createdAt).toLocaleString()}</span>
+                  <OwnerLabel owner={(pkg as { owner?: string }).owner} ownerEmail={(pkg as { ownerEmail?: string }).ownerEmail} />
+                </div>
+              </div>
               {pkg.iotThingName && <Row label="IoT Thing" value={pkg.iotThingName} mono />}
               {pkg.iamRoleArn && <Row label="IAM Role" value={pkg.iamRoleArn} mono />}
               {pkg.logGroupName && <Row label="Log Group" value={pkg.logGroupName} mono />}

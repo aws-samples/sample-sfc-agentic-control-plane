@@ -5,7 +5,7 @@ import io, json, logging, os, uuid, urllib.request, zipfile
 from datetime import datetime, timezone
 import boto3
 from boto3.dynamodb.conditions import Key
-from sfc_cp_utils import ddb as ddb_util, s3 as s3_util, iot as iot_util
+from sfc_cp_utils import ddb as ddb_util, s3 as s3_util, iot as iot_util, auth as auth_util
 
 # SFC_Agent_Files table key helpers (PK=file_type, SK=sort_key)
 _FILE_TYPE_CONFIG = "config"
@@ -55,22 +55,27 @@ def handler(event: dict, context) -> dict:
     path = event.get("rawPath", "")
     path_params = event.get("pathParameters") or {}
     package_id = path_params.get("packageId")
+    caller_sub, caller_groups = auth_util.caller(event)
+    caller_email = auth_util.caller_email(event)
+
+    logger.info("Request: %s %s sub=%s groups=%s", method, path, caller_sub, caller_groups)
+
     try:
         if path == "/packages":
             if method == "POST":
-                return _create_package(_parse_body(event))
+                return _create_package(_parse_body(event), caller_sub, caller_email)
             if method == "GET":
-                return _list_packages()
+                return _list_packages(caller_sub, caller_groups)
         if package_id and path.endswith("/download"):
-            return _get_download_url(package_id)
+            return _get_download_url(package_id, caller_sub, caller_groups)
         if package_id and path.endswith("/tags") and method == "PATCH":
-            return _update_package_tags(package_id, _parse_body(event))
+            return _update_package_tags(package_id, _parse_body(event), caller_sub, caller_groups)
         if package_id:
             if method == "GET":
-                return _get_package(package_id)
+                return _get_package(package_id, caller_sub, caller_groups)
             if method == "DELETE":
                 deep = (event.get("queryStringParameters") or {}).get("deep", "false").lower() == "true"
-                return _delete_package(package_id, deep=deep)
+                return _delete_package(package_id, caller_sub, caller_groups, deep=deep)
         return _error(404, "NOT_FOUND", "Route not matched")
     except Exception:
         logger.exception("Unhandled error")
@@ -81,8 +86,8 @@ def handler(event: dict, context) -> dict:
 
 # ── Route implementations ────────────────────────────────────────────────────
 
-def _create_package(body: dict) -> dict:
-    # Resolve config to use
+def _create_package(body: dict, caller_sub: str, caller_email: str = "") -> dict:
+    """Create a launch package; stamps owner=caller_sub and ownerEmail on the DDB record."""
     config_id = body.get("configId")
     config_version = body.get("configVersion")
     if not config_id:
@@ -103,7 +108,6 @@ def _create_package(body: dict) -> dict:
             f"Only the focused config version can be used to create a launch package. "
             f"Currently focused: {focused_id} @ {focused_ver}",
         )
-    # Use the focused version if not explicitly overridden
     if not config_version:
         config_version = focused_ver
 
@@ -118,7 +122,6 @@ def _create_package(body: dict) -> dict:
                 f"(packageId: {pkg['packageId']}). Each config version may only have one package.",
             )
 
-    # Load SFC config (using file_type/sort_key schema of SFC_Agent_Files table)
     cfg_item = _ddb_get_config(_cfg_table, config_id, config_version)
     if not cfg_item:
         return _error(404, "NOT_FOUND", f"Config {config_id}/{config_version} not found")
@@ -129,23 +132,22 @@ def _create_package(body: dict) -> dict:
     package_id = str(uuid.uuid4())
     now_utc = datetime.now(timezone.utc)
     created_at = now_utc.isoformat()
-    # Compact timestamp suffix for the zip file name, e.g. "20260226T160622Z"
     zip_timestamp = now_utc.strftime("%Y%m%dT%H%M%SZ")
 
-    # Write PROVISIONING record
-    ddb_util.put_package(_pkg_table, {
+    # Write PROVISIONING record — stamp owner + email
+    pkg_item: dict = {
         "packageId": package_id, "createdAt": created_at,
         "configId": config_id, "configVersion": config_version,
         "status": "PROVISIONING", "telemetryEnabled": True, "diagnosticsEnabled": False,
-    })
+        "owner": caller_sub,
+    }
+    if caller_email:
+        pkg_item["ownerEmail"] = caller_email
+    ddb_util.put_package(_pkg_table, pkg_item)
 
-    # IoT provisioning
     prov = iot_util.provision_thing(package_id, _region, sfc_config)
-
-    # Rewrite SFC config with IoT credential provider
     rewritten = _inject_iot_credentials(sfc_config, package_id, prov, cfg_item.get("name", config_id))
 
-    # Build iot-config.json
     iot_config = {
         "iotEndpoint": prov["iotEndpoint"],
         "iotDataEndpoint": prov["iotDataEndpoint"],
@@ -159,21 +161,14 @@ def _create_package(body: dict) -> dict:
         "topicPrefix": f"sfc/{package_id}/control",
     }
 
-    # Fetch Amazon Root CA
     root_ca = _fetch_root_ca()
-
-    # Assemble zip in memory
     zip_bytes = _build_zip(package_id, rewritten, iot_config, prov, root_ca)
 
-    # Upload zip (file name includes a timestamp suffix for uniqueness)
     zip_key = s3_util.package_zip_s3_key(package_id, timestamp=zip_timestamp)
     s3_util.put_zip(CONFIGS_BUCKET, zip_key, zip_bytes)
-
-    # Store certs in S3 (private assets — not included in API response)
     s3_util.put_cert_asset(CONFIGS_BUCKET, package_id, "device.cert.pem", prov["certPem"])
     s3_util.put_cert_asset(CONFIGS_BUCKET, package_id, "device.private.key", prov["privateKey"])
 
-    # Update DDB → READY
     ddb_util.update_package(_pkg_table, package_id, created_at, {
         "status": "READY",
         "iotThingName": prov["thingName"],
@@ -188,28 +183,38 @@ def _create_package(body: dict) -> dict:
     return _ok({"packageId": package_id, "status": "READY", "downloadUrl": download_url})
 
 
-def _list_packages() -> dict:
+def _list_packages(caller_sub: str, groups: list[str]) -> dict:
+    """Return packages visible to the caller (own + global-read/write)."""
     pkgs = ddb_util.list_packages(_pkg_table)
-    return _ok({"packages": pkgs})
+    visible = [p for p in pkgs if auth_util.can_read(p.get("owner"), caller_sub, groups)]
+    return _ok({"packages": visible})
 
 
-def _get_package(package_id: str) -> dict:
+def _get_package(package_id: str, caller_sub: str, groups: list[str]) -> dict:
     pkg = ddb_util.get_package(_pkg_table, package_id)
     if not pkg:
         return _error(404, "NOT_FOUND", f"Package {package_id} not found")
+    if not auth_util.can_read(pkg.get("owner"), caller_sub, groups):
+        return _error(403, "FORBIDDEN", "You do not have permission to read this package")
     return _ok(pkg)
 
 
-def _delete_package(package_id: str, deep: bool = False) -> dict:
+def _delete_package(
+    package_id: str,
+    caller_sub: str,
+    groups: list[str],
+    deep: bool = False,
+) -> dict:
     pkg = ddb_util.get_package(_pkg_table, package_id)
     if not pkg:
         return _error(404, "NOT_FOUND", f"Package {package_id} not found")
+    if not auth_util.can_write(pkg.get("owner"), caller_sub, groups):
+        return _error(403, "FORBIDDEN", "You do not have permission to delete this package")
 
     if deep:
-        # ── Tear down IoT / IAM / CloudWatch resources ────────────────────
-        thing_name  = pkg.get("iotThingName", f"sfc-{package_id}")
-        cert_arn    = pkg.get("iotCertArn", "")
-        role_alias_arn = pkg.get("iotRoleAliasArn", "")
+        thing_name      = pkg.get("iotThingName", f"sfc-{package_id}")
+        cert_arn        = pkg.get("iotCertArn", "")
+        role_alias_arn  = pkg.get("iotRoleAliasArn", "")
         role_alias_name = role_alias_arn.split("/")[-1] if role_alias_arn else f"sfc-role-alias-{package_id}"
         iam_role_name   = f"sfc-edge-role-{package_id}"
 
@@ -221,7 +226,6 @@ def _delete_package(package_id: str, deep: bool = False) -> dict:
         except Exception as exc:
             logger.warning("Partial failure during deep-delete of %s: %s", package_id, exc)
 
-        # ── Delete CloudWatch log group ───────────────────────────────────
         log_group = pkg.get("logGroupName", f"/sfc/launch-packages/{package_id}")
         try:
             logs_client = boto3.client("logs", region_name=_region)
@@ -234,10 +238,17 @@ def _delete_package(package_id: str, deep: bool = False) -> dict:
     return {"statusCode": 204, "body": ""}
 
 
-def _update_package_tags(package_id: str, body: dict) -> dict:
+def _update_package_tags(
+    package_id: str,
+    body: dict,
+    caller_sub: str,
+    groups: list[str],
+) -> dict:
     pkg = ddb_util.get_package(_pkg_table, package_id)
     if not pkg:
         return _error(404, "NOT_FOUND", f"Package {package_id} not found")
+    if not auth_util.can_write(pkg.get("owner"), caller_sub, groups):
+        return _error(403, "FORBIDDEN", "You do not have permission to update this package")
     tags = body.get("tags", [])
     if not isinstance(tags, list):
         return _error(400, "BAD_REQUEST", "'tags' must be a list of strings")
@@ -245,10 +256,16 @@ def _update_package_tags(package_id: str, body: dict) -> dict:
     return _ok({"packageId": package_id, "tags": tags})
 
 
-def _get_download_url(package_id: str) -> dict:
+def _get_download_url(
+    package_id: str,
+    caller_sub: str,
+    groups: list[str],
+) -> dict:
     pkg = ddb_util.get_package(_pkg_table, package_id)
     if not pkg:
         return _error(404, "NOT_FOUND", f"Package {package_id} not found")
+    if not auth_util.can_read(pkg.get("owner"), caller_sub, groups):
+        return _error(403, "FORBIDDEN", "You do not have permission to download this package")
     zip_key = pkg.get("s3ZipKey") or s3_util.package_zip_s3_key(package_id)
     url = s3_util.generate_presigned_download_url(CONFIGS_BUCKET, zip_key)
     return _ok({"downloadUrl": url, "expiresIn": 3600})

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json, logging, os
 from datetime import datetime, timezone
 import boto3
-from sfc_cp_utils import ddb as ddb_util
+from sfc_cp_utils import ddb as ddb_util, auth as auth_util
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -22,14 +22,24 @@ def handler(event: dict, context) -> dict:
     method = event.get("requestContext", {}).get("http", {}).get("method", "GET")
     path_params = event.get("pathParameters") or {}
     package_id = path_params.get("packageId")
+    caller_sub, caller_groups = auth_util.caller(event)
     try:
         pkg = ddb_util.get_package(_pkg_table, package_id)
         if not pkg:
             return _error(404, "NOT_FOUND", f"Package {package_id} not found")
-        if method == "POST":
-            return _create_component(pkg)
+
+        # GET (status) requires read access; POST (create component) requires write access
+        if not auth_util.can_read(pkg.get("owner"), caller_sub, caller_groups):
+            return _error(403, "FORBIDDEN", "You do not have permission to access this package")
+
         if method == "GET":
             return _get_status(pkg)
+
+        if method == "POST":
+            if not auth_util.can_write(pkg.get("owner"), caller_sub, caller_groups):
+                return _error(403, "FORBIDDEN", "You do not have permission to create Greengrass components for this package")
+            return _create_component(pkg)
+
         return _error(404, "NOT_FOUND", "Route not matched")
     except Exception as exc:
         logger.exception("Unhandled error")

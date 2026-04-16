@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { getUser } from "../auth";
 import {
   getConfig,
   saveConfig,
@@ -172,7 +173,31 @@ export default function ConfigEditor() {
             title="Click to edit config name"
             placeholder="Config name"
           />
-          <p className="text-xs text-slate-500 font-mono px-2 mt-0.5 truncate">{configId}</p>
+          <div className="flex items-center gap-2 px-2 mt-0.5">
+            <p className="text-xs text-slate-500 font-mono truncate">{configId}</p>
+            {(() => {
+              const owner = (cfg as { owner?: string }).owner;
+              const ownerEmail = (cfg as { ownerEmail?: string }).ownerEmail;
+              if (!owner) return null;
+              const user = getUser();
+              const isMe = user?.sub === owner;
+              const display = isMe ? "you" : (ownerEmail || owner.slice(0, 8) + "…");
+              const title = isMe
+                ? `Created by you (${ownerEmail || owner})`
+                : `Created by ${ownerEmail || owner}`;
+              return (
+                <span
+                  className="inline-flex items-center gap-0.5 text-[10px] text-slate-500 shrink-0"
+                  title={title}
+                >
+                  <svg viewBox="0 0 24 24" className="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+                  </svg>
+                  {display}
+                </span>
+              );
+            })()}
+          </div>
         </div>
 
         {/* Row 2 — tags, version picker, action buttons */}

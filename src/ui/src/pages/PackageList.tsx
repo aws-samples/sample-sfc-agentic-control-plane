@@ -3,6 +3,30 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useState, useEffect, useMemo } from "react";
 import { listPackages, deepDeletePackage, listConfigs, listConfigVersions } from "../api/client";
 import type { LaunchPackage } from "../api/client";
+import { usePermissions } from "../hooks/usePermissions";
+import { getUser } from "../auth";
+
+/** Subtle "who created" chip — shows "you", email, or truncated sub. */
+function OwnerChip({ owner, ownerEmail }: { owner?: string; ownerEmail?: string }) {
+  if (!owner) return null;
+  const user = getUser();
+  const isMe = user?.sub === owner;
+  const display = isMe ? "you" : (ownerEmail || owner.slice(0, 8) + "…");
+  const title = isMe
+    ? `Created by you (${ownerEmail || owner})`
+    : `Created by ${ownerEmail || owner}`;
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 text-[10px] text-slate-500 mt-0.5"
+      title={title}
+    >
+      <svg viewBox="0 0 24 24" className="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+      </svg>
+      {display}
+    </span>
+  );
+}
 import StatusBadge from "../components/StatusBadge";
 import HeartbeatStatusLed from "../components/HeartbeatStatusLed";
 import ConfirmDialog from "../components/ConfirmDialog";
@@ -44,6 +68,7 @@ function getValue(item: LaunchPackage & { _configName?: string }, column: string
 export default function PackageList() {
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const { canWrite } = usePermissions();
   const [dangerOpen, setDangerOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [ggConfirmTarget, setGgConfirmTarget] = useState<string | null>(null);
@@ -246,7 +271,10 @@ export default function PackageList() {
                       : "—"}
                   </td>
                   <td className="text-xs text-slate-500">
-                    {new Date(pkg.createdAt).toLocaleDateString()}
+                    <div className="flex flex-col">
+                      {new Date(pkg.createdAt).toLocaleDateString()}
+                      <OwnerChip owner={pkg.owner} ownerEmail={(pkg as { ownerEmail?: string }).ownerEmail} />
+                    </div>
                   </td>
                   <td onClick={(e) => e.stopPropagation()}>
                     <div className="flex items-center gap-2">
@@ -315,12 +343,21 @@ export default function PackageList() {
                       )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        className="btn btn-ghost text-xs text-red-300 hover:text-red-200 border border-red-700/70 bg-red-950/30"
-                        onClick={() => setDeleteTarget(pkg.packageId)}
-                      >
-                        🗑 Delete Package
-                      </button>
+                      {canWrite(pkg.owner) ? (
+                        <button
+                          className="btn btn-ghost text-xs text-red-300 hover:text-red-200 border border-red-700/70 bg-red-950/30"
+                          onClick={() => setDeleteTarget(pkg.packageId)}
+                        >
+                          🗑 Delete Package
+                        </button>
+                      ) : (
+                        <span
+                          className="btn btn-ghost text-xs text-slate-600 cursor-not-allowed opacity-50 border border-slate-700/40"
+                          title="You do not have permission to delete this package"
+                        >
+                          🗑 Delete Package
+                        </span>
+                      )}
                     </div>
                   </div>
                 ))}

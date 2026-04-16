@@ -158,31 +158,39 @@ _STATE_KEY = "global"
 
 
 def get_control_state(state_table, state_key: str = _STATE_KEY) -> dict | None:
-    """Return the singleton control-plane state item."""
+    """Return the control-plane state item for the given state_key (default: ``"global"``)."""
     resp = state_table.get_item(Key={"stateKey": state_key})
     return resp.get("Item")
 
 
-def put_control_state(state_table, item: dict) -> None:
-    """Write the singleton control-plane state item."""
+def put_control_state(state_table, item: dict, state_key: str = _STATE_KEY) -> None:
+    """Write a control-plane state item.
+
+    *state_key* is used when ``item`` does not already contain a ``stateKey`` field.
+    """
     if "stateKey" not in item:
-        item["stateKey"] = _STATE_KEY
+        item["stateKey"] = state_key
     if "updatedAt" not in item:
         item["updatedAt"] = datetime.now(timezone.utc).isoformat()
     state_table.put_item(Item=item)
 
 
-def set_focused_config(state_table, config_id: str, version: str) -> dict:
-    """Update the focused config in the ControlPlaneStateTable."""
+def set_focused_config(
+    state_table,
+    config_id: str,
+    version: str,
+    state_key: str = _STATE_KEY,
+) -> dict:
+    """Update the focused config in the ControlPlaneStateTable (global by default)."""
     updated_at = datetime.now(timezone.utc).isoformat()
     state_table.put_item(Item={
-        "stateKey": _STATE_KEY,
+        "stateKey": state_key,
         "focusedConfigId": config_id,
         "focusedConfigVersion": version,
         "updatedAt": updated_at,
     })
     return {
-        "stateKey": _STATE_KEY,
+        "stateKey": state_key,
         "focusedConfigId": config_id,
         "focusedConfigVersion": version,
         "updatedAt": updated_at,

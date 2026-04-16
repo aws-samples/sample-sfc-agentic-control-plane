@@ -6,12 +6,20 @@ import PackageDetail from "./pages/PackageDetail";
 import LogViewer from "./pages/LogViewer";
 import InfoPage from "./pages/InfoPage";
 import FocusBanner from "./components/FocusBanner";
+import ForbiddenModal from "./components/ForbiddenModal";
 import LoginGate from "./components/LoginGate";
 import { logout, getUser } from "./auth";
+
+function roleBadge(groups: string[]): string | null {
+  if (groups.includes("global-write")) return "global-write";
+  if (groups.includes("global-read"))  return "global-read";
+  return null;
+}
 
 export default function App() {
   const user = getUser();
   const displayName = user?.email ?? user?.username ?? user?.sub ?? "";
+  const role = roleBadge(user?.groups ?? []);
   return (
     <LoginGate>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
@@ -90,6 +98,18 @@ export default function App() {
                   <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
                 </svg>
                 {displayName}
+                {role && (
+                  <span
+                    className={`ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold leading-none ${
+                      role === "global-write"
+                        ? "bg-amber-900/50 text-amber-300 ring-1 ring-amber-700/50"
+                        : "bg-sky-900/50 text-sky-300 ring-1 ring-sky-700/50"
+                    }`}
+                    title={role === "global-write" ? "Can read and write all users' resources" : "Can read all users' resources"}
+                  >
+                    {role}
+                  </span>
+                )}
               </span>
             )}
             <div className="h-4 w-px bg-[#252d3d]" />
@@ -105,6 +125,9 @@ export default function App() {
 
         {/* Focus banner */}
         <FocusBanner />
+
+        {/* Global 403 modal — mounts once, listens for api:forbidden events */}
+        <ForbiddenModal />
 
         {/* Page content */}
         <main className="flex-1 overflow-auto">
