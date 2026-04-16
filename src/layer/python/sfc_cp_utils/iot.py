@@ -84,7 +84,7 @@ def provision_thing(package_id: str, region: str, sfc_config: dict | None = None
         alias_resp = iot.create_role_alias(
             roleAlias=role_alias_name,
             roleArn=iam_role_arn,
-            credentialDurationSeconds=3600,
+            credentialDurationSeconds=43200,  # 12 hours — safety net for edge refresh intervals
         )
         role_alias_arn = alias_resp["roleAliasArn"]
     except iot.exceptions.ResourceAlreadyExistsException:
@@ -483,6 +483,7 @@ def _create_edge_iam_role(
         "RoleName": role_name,
         "AssumeRolePolicyDocument": json.dumps(trust_policy),
         "Description": f"Edge IAM role for SFC Launch Package {package_id}",
+        "MaxSessionDuration": 43200,  # must be >= role alias credentialDurationSeconds (12 hr)
         "Tags": [{"Key": "sfc:packageId", "Value": package_id}],
     }
 

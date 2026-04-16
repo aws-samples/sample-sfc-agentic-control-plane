@@ -24,6 +24,7 @@
 import {
   CustomResource,
   Duration,
+  FileSystem,
   NestedStack,
   NestedStackProps,
   aws_codebuild as codebuild,
@@ -32,6 +33,7 @@ import {
   aws_s3 as s3,
   aws_ssm as ssm,
 } from 'aws-cdk-lib';
+import * as path from 'path';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { Provider } from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
@@ -288,7 +290,7 @@ def handler(event, context):
       serviceToken: uiBuildProvider.serviceToken,
       properties: {
         ProjectName: uiBuildProject.projectName,
-        BuildVersion: '1',  // Increment to force rebuild on updates
+        BuildVersion: FileSystem.fingerprint(path.join(__dirname, '../src/ui')),
       },
     });
     // Explicit dependency: CustomResource must wait for SSM parameter (which depends on CloudFront)

@@ -9,7 +9,7 @@ Edge agent that:
   4. Ships OTEL log records to CloudWatch (SigV4-signed)
   5. Maintains an MQTT5 control channel (diagnostics, config-update, restart)
   6. Publishes heartbeat every 5 s on sfc/{packageId}/heartbeat
-  7. Refreshes IoT credentials every 50 min
+  7. Refreshes IoT credentials every 6 hrs
   8. Handles SIGTERM/SIGINT gracefully
 
 Usage:
@@ -52,7 +52,7 @@ _KEY_PATH = _HERE.parent / "iot" / "device.private.key"
 _CA_PATH = _HERE.parent / "iot" / "AmazonRootCA1.pem"
 
 _HEARTBEAT_INTERVAL_S = 5
-_CREDENTIAL_REFRESH_INTERVAL_S = 300
+_CREDENTIAL_REFRESH_INTERVAL_S = 21600
 _RECENT_LOG_RING_SIZE = 3
 _CREDENTIAL_ENDPOINT_TEMPLATE = (
     "https://{iotEndpoint}/role-aliases/{roleAlias}/credentials"
@@ -287,8 +287,12 @@ def _credential_refresh_loop(iot_cfg: dict) -> None:
     we wait first to avoid an immediate redundant re-fetch that can return
     HTTP 404 from the IoT credential provider endpoint when called too soon
     after the initial vend.
+
+    After updating the in-process _aws_credentials dict (used by runner's own
+    Python code — OTEL SigV4, boto3), SFC is restarted so it inherits the fresh
+    credentials in its subprocess env (required for SFC's metrics writer which
+    uses the standard AWS credential chain).
     """
-    global _aws_credentials
     while not _shutdown.is_set():
         # Wait first — main() already holds fresh credentials at thread start
         _shutdown.wait(timeout=_CREDENTIAL_REFRESH_INTERVAL_S)
@@ -297,13 +301,14 @@ def _credential_refresh_loop(iot_cfg: dict) -> None:
         try:
             creds = _fetch_credentials(iot_cfg)
             with _credentials_lock:
-                _aws_credentials = creds
-                os.environ.update(creds)
-                if _sfc_proc and _sfc_proc.poll() is None:
-                    for k, v in creds.items():
-                        _sfc_proc.env = getattr(_sfc_proc, "env", os.environ.copy())
-                        _sfc_proc.env[k] = v
-            logger.info("Credentials refreshed successfully")
+                _aws_credentials.update(creds)
+            logger.info("Credentials refreshed successfully — restarting SFC with fresh credentials")
+            sfc_bin_dir = _HERE / ".sfc-bin"
+            sfc_cfg = _load_sfc_config()
+            sfc_version = _detect_sfc_version(sfc_cfg)
+            sfc_main_dir = _ensure_sfc_artifacts(sfc_version, sfc_cfg, sfc_bin_dir)
+            log_flag = "-trace" if _diagnostics_enabled else "-info"
+            _restart_sfc(sfc_main_dir, _SFC_CONFIG_PATH, sfc_bin_dir, log_flag)
         except Exception as exc:
             logger.error("Credential refresh failed: %s", exc)
 
@@ -318,9 +323,13 @@ def _start_sfc(
     sfc_bin_dir: Path,
     log_level_flag: str = "-info",
 ) -> subprocess.Popen:
+    # Build SFC env from the current process env plus the freshly-vended IoT
+    # credentials so that SFC's metrics writer (CloudWatch) can use the standard
+    # AWS credential chain (env vars).
     env = {**os.environ}
     with _credentials_lock:
-        env.update(_aws_credentials)
+        creds = dict(_aws_credentials)
+    env.update(creds)
     # MODULES_DIR must resolve ${MODULES_DIR} references in sfc-config JarFiles
     env["MODULES_DIR"] = str(sfc_bin_dir)
     classpath = str(sfc_main_dir / "lib" / "*")
@@ -478,11 +487,29 @@ class _SigV4OTLPLogExporter:
         return self._exporter.force_flush(timeout_millis)
 
 
+def _make_boto3_client(service: str, region: str):
+    """
+    Create a boto3 client using the IoT-vended credentials stored in
+    _aws_credentials, bypassing the default credential chain entirely.
+    This is required because we deliberately do NOT write credentials into
+    os.environ (to keep SFC's subprocess env clean).
+    """
+    import boto3
+    with _credentials_lock:
+        creds = dict(_aws_credentials)
+    return boto3.client(
+        service,
+        region_name=region,
+        aws_access_key_id=creds.get("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=creds.get("AWS_SECRET_ACCESS_KEY"),
+        aws_session_token=creds.get("AWS_SESSION_TOKEN"),
+    )
+
+
 def _ensure_cloudwatch_log_stream(region: str, log_group: str, log_stream: str) -> None:
     """Create the CloudWatch log stream if it does not already exist."""
-    import boto3
     from botocore.exceptions import ClientError
-    client = boto3.client("logs", region_name=region)
+    client = _make_boto3_client("logs", region)
     try:
         client.create_log_stream(logGroupName=log_group, logStreamName=log_stream)
         logger.info("Created CloudWatch log stream: %s in %s", log_stream, log_group)
@@ -598,8 +625,7 @@ def _resolve_mqtt_endpoint(iot_cfg: dict) -> str:
     # Backward-compatibility path for packages created before this fix
     raw_ep = iot_cfg["iotEndpoint"]
     if "credentials.iot" in raw_ep:
-        import boto3
-        data_ep = boto3.client("iot", region_name=iot_cfg["region"]).describe_endpoint(
+        data_ep = _make_boto3_client("iot", iot_cfg["region"]).describe_endpoint(
             endpointType="iot:Data-ATS"
         )["endpointAddress"]
     else:
@@ -720,7 +746,7 @@ def _dispatch_control(topic: str, payload: bytes, iot_cfg: dict) -> None:
 
 def _inject_iot_credentials(sfc_config: dict, iot_cfg: dict) -> dict:
     """
-    Inject AwsIotCredentialProviderClients, Metrics, and target AwsCredentialClient refs
+    Inject AwsIotCredentialProviderClients, Metrics, and target CredentialProviderClient refs
     into *sfc_config* using the IoT metadata from *iot_cfg* (iot-config.json).
 
     Mirrors the injection done by launch_pkg_handler.py at LP creation time so that
@@ -767,8 +793,8 @@ def _inject_iot_credentials(sfc_config: dict, iot_cfg: dict) -> dict:
     targets = cfg.get("Targets", {})
     if isinstance(targets, dict):
         for tgt in targets.values():
-            if isinstance(tgt, dict) and "AwsCredentialClient" not in tgt:
-                tgt["AwsCredentialClient"] = cred_name
+            if isinstance(tgt, dict) and "CredentialProviderClient" not in tgt:
+                tgt["CredentialProviderClient"] = cred_name
 
     return cfg
 
@@ -895,6 +921,11 @@ def main() -> None:
 
     # Load configuration
     iot_cfg = _load_iot_config()
+    # Set AWS_REGION early so all Python code (boto3, botocore, OTEL) and the
+    # SFC subprocess (which inherits os.environ) resolve the correct region
+    # without requiring explicit region_name= on every client call.
+    os.environ["AWS_REGION"] = iot_cfg.get("region", os.environ.get("AWS_REGION", "us-east-1"))
+    os.environ.setdefault("AWS_DEFAULT_REGION", os.environ["AWS_REGION"])
     sfc_cfg = _load_sfc_config()
     sfc_version = _detect_sfc_version(sfc_cfg)
     sfc_bin_dir = _HERE / ".sfc-bin"
@@ -911,7 +942,6 @@ def main() -> None:
         creds = _fetch_credentials(iot_cfg)
         with _credentials_lock:
             _aws_credentials.update(creds)
-        os.environ.update(creds)
     except Exception as exc:
         logger.error("Initial credential fetch failed: %s", exc)
         sys.exit(1)

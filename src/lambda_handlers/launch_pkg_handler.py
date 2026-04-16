@@ -275,6 +275,7 @@ def _inject_iot_credentials(sfc_config: dict, package_id: str, prov: dict, confi
     # Always inject the SFC top-level Metrics block (CloudWatch metrics adapter)
     cfg["Metrics"] = {
         "Enabled": True,
+        "CollectCoreMetrics": False,
         "CredentialProviderClient": cred_provider_name,
         "Interval": 60,
         "Region": _region,
@@ -296,8 +297,15 @@ def _inject_iot_credentials(sfc_config: dict, package_id: str, prov: dict, confi
     targets = cfg.get("Targets", {})
     if isinstance(targets, dict):
         for tgt in targets.values():
-            if isinstance(tgt, dict) and "AwsCredentialClient" not in tgt:
-                tgt["AwsCredentialClient"] = cred_provider_name
+            if isinstance(tgt, dict) and "CredentialProviderClient" not in tgt:
+                tgt["CredentialProviderClient"] = cred_provider_name
+
+    # Disable metrics on all source protocol adapters (only targets shall collect & send metrics)
+    sources = cfg.get("Sources", {})
+    if isinstance(sources, dict):
+        for src in sources.values():
+            if isinstance(src, dict):
+                src["Metrics"] = {"Enabled": False}
     return cfg
 
 
