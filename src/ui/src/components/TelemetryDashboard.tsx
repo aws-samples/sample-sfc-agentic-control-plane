@@ -36,10 +36,10 @@ ChartJS.register(
 );
 
 const LOOKBACK_OPTIONS = [
-  { label: "1 min", value: 1 },
-  { label: "5 min", value: 5 },
-  { label: "15 min", value: 15 },
-  { label: "30 min", value: 30 },
+  { label: "15 sec", value: 15 },
+  { label: "30 sec", value: 30 },
+  { label: "1 min", value: 60 },
+  { label: "5 min", value: 300 },
 ];
 
 interface Props {
@@ -224,7 +224,7 @@ function ChannelDetailModal({
 const PAGE_SIZE = 20;
 
 export default function TelemetryDashboard({ packageId }: Props) {
-  const [lookback, setLookback] = useState(5);
+  const [lookback, setLookback] = useState(30);
   const [selectedChannel, setSelectedChannel] = useState<TelemetryChannel | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [page, setPage] = useState(0);

@@ -458,11 +458,11 @@ export interface TelemetryResponse {
 
 export const getChannelTelemetry = (
   packageId: string,
-  lookbackMinutes = 5
+  lookbackSeconds = 30
 ) =>
   api
-    .get<TelemetryResponse>(`/packages/${packageId}/telemetry`, {
-      params: { lookbackMinutes },
+    .post<TelemetryResponse>(`/packages/${packageId}/telemetry`, {
+      lookbackSeconds,
     })
     .then((r) => r.data);
 

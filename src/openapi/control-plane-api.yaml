@@ -1049,19 +1049,23 @@ paths:
   # ────────────────────────────────────────────────────────────────
 
   /packages/{packageId}/telemetry:
-    get:
+    post:
       operationId: getChannelTelemetry
-      summary: Get live channel telemetry data with sparkline history
+      summary: Query live channel telemetry data with sparkline history
       tags: [packages]
       parameters:
         - $ref: "#/components/parameters/packageId"
-        - name: lookbackMinutes
-          in: query
-          required: false
-          schema:
-            type: integer
-            default: 5
-            maximum: 60
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lookbackSeconds:
+                  type: integer
+                  default: 30
+                  maximum: 300
       responses:
         "200":
           description: Channel telemetry with sparkline data

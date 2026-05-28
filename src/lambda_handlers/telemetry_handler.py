@@ -28,8 +28,9 @@ _telemetry_table = _dynamodb.Table(TELEMETRY_TABLE_NAME)
 _pkg_table = _dynamodb.Table(LAUNCH_PKG_TABLE)
 
 _MAX_SPARKLINE_POINTS = 1000
-_DEFAULT_LOOKBACK_MINUTES = 5
-_MAX_LOOKBACK_MINUTES = 60
+_MAX_TOTAL_POINTS = 10000
+_DEFAULT_LOOKBACK_SECONDS = 30
+_MAX_LOOKBACK_SECONDS = 300
 
 
 def handler(event: dict, _context) -> dict:
@@ -46,13 +47,13 @@ def handler(event: dict, _context) -> dict:
     if not auth_util.can_read(pkg.get("owner"), caller_sub, caller_groups):
         return _error(403, "FORBIDDEN", "You do not have permission to read this package")
 
-    qs = event.get("queryStringParameters") or {}
+    body = json.loads(event.get("body") or "{}")
     try:
-        lookback = min(int(qs.get("lookbackMinutes", _DEFAULT_LOOKBACK_MINUTES)), _MAX_LOOKBACK_MINUTES)
+        lookback_s = min(int(body.get("lookbackSeconds", _DEFAULT_LOOKBACK_SECONDS)), _MAX_LOOKBACK_SECONDS)
     except (ValueError, TypeError):
-        lookback = _DEFAULT_LOOKBACK_MINUTES
+        lookback_s = _DEFAULT_LOOKBACK_SECONDS
 
-    start_iso = (datetime.now(timezone.utc) - timedelta(minutes=lookback)).isoformat()
+    start_iso = (datetime.now(timezone.utc) - timedelta(seconds=lookback_s)).isoformat()
 
     items = _query_telemetry(package_id, start_iso)
 
@@ -77,9 +78,15 @@ def handler(event: dict, _context) -> dict:
                         pass
 
     result_channels = []
+    total_points = 0
     for name, points in sorted(channel_data.items()):
         points.sort(key=lambda p: p[0])
-        recent = points[-_MAX_SPARKLINE_POINTS:]
+        remaining_budget = _MAX_TOTAL_POINTS - total_points
+        if remaining_budget <= 0:
+            break
+        per_channel_cap = min(_MAX_SPARKLINE_POINTS, remaining_budget)
+        recent = points[-per_channel_cap:]
+        total_points += len(recent)
         result_channels.append({
             "name": name,
             "currentValue": recent[-1][1] if recent else None,
