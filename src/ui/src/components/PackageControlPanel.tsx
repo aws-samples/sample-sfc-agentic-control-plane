@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getControlState,
   setDiagnostics,
+  setChannelTelemetry,
   pushConfigUpdate,
   restartSfc,
   listConfigs,
@@ -115,6 +116,10 @@ export default function PackageControlPanel({ pkg }: Props) {
     mutationFn: (v: boolean) => setDiagnostics(pkg.packageId, v),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["control", pkg.packageId] }),
   });
+  const chTelMut = useMutation({
+    mutationFn: (v: boolean) => setChannelTelemetry(pkg.packageId, v),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["control", pkg.packageId] }),
+  });
   const cfgPushMut = useMutation({
     mutationFn: () => pushConfigUpdate(pkg.packageId, pushConfigId, pushVersion),
     onSuccess: () => {
@@ -130,6 +135,7 @@ export default function PackageControlPanel({ pkg }: Props) {
   });
 
   const diagnostics = ctrl?.diagnosticsEnabled === true;
+  const channelTelemetry = ctrl?.channelTelemetryEnabled !== false;
 
   return (
     <div className="space-y-4">
@@ -146,6 +152,14 @@ export default function PackageControlPanel({ pkg }: Props) {
       {/* Runtime Controls — Diagnostics toggle + Restart */}
       <div className="card space-y-1">
         <p className="text-xs font-medium text-slate-500 mb-2">Runtime Controls</p>
+
+        <Toggle
+          label="Channel Telemetry"
+          value={channelTelemetry}
+          onApply={(v) => chTelMut.mutate(v)}
+          disabled={!isReady}
+          pending={chTelMut.isPending}
+        />
 
         <Toggle
           label="Diagnostics (TRACE log)"

@@ -45,6 +45,8 @@ def handler(event: dict, context) -> dict:
 
         if path.endswith("/diagnostics") and method == "PUT":
             return _set_toggle(pkg, "diagnostics", _parse_body(event))
+        if path.endswith("/channel-telemetry") and method == "PUT":
+            return _set_toggle(pkg, "channel-telemetry", _parse_body(event))
         if path.endswith("/config-update") and method == "POST":
             return _push_config_update(pkg, _parse_body(event))
         if path.endswith("/restart") and method == "POST":
@@ -65,6 +67,7 @@ def _get_control_state(pkg: dict) -> dict:
     return _ok({
         "packageId": pkg["packageId"],
         "diagnosticsEnabled": pkg.get("diagnosticsEnabled", False),
+        "channelTelemetryEnabled": pkg.get("channelTelemetryEnabled", True),
         "lastConfigUpdateAt": pkg.get("lastConfigUpdateAt"),
         "lastConfigUpdateVersion": pkg.get("lastConfigUpdateVersion"),
         "lastRestartAt": pkg.get("lastRestartAt"),
@@ -80,7 +83,12 @@ def _set_toggle(pkg: dict, toggle_type: str, body: dict) -> dict:
         return _error(400, "BAD_REQUEST", "'enabled' must be a boolean")
     topic = f"sfc/{pkg['packageId']}/control/{toggle_type}"
     _iot_data.publish(topic=topic, qos=1, payload=json.dumps({"enabled": enabled}))
-    attr_name = "telemetryEnabled" if toggle_type == "telemetry" else "diagnosticsEnabled"
+    _toggle_attr_map = {
+        "telemetry": "telemetryEnabled",
+        "diagnostics": "diagnosticsEnabled",
+        "channel-telemetry": "channelTelemetryEnabled",
+    }
+    attr_name = _toggle_attr_map.get(toggle_type, f"{toggle_type}Enabled")
     ddb_util.update_package(_pkg_table, pkg["packageId"], pkg["createdAt"], {attr_name: enabled})
     return _ok({"message": f"{toggle_type} set to {enabled}"})
 

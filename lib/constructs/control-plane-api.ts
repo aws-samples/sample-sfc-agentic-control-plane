@@ -21,6 +21,7 @@ export interface ControlPlaneApiProps {
   configTable: dynamodb.ITable;
   launchPackageTable: dynamodb.ITable;
   controlPlaneStateTable: dynamodb.ITable;
+  telemetryTable: dynamodb.ITable;
 }
 
 /**
@@ -58,12 +59,13 @@ export class ControlPlaneApi extends Construct {
   public readonly fnAgentRemediate: lambda.Function;
   public readonly fnTagExtract: lambda.Function;
   public readonly fnMetrics: lambda.Function;
+  public readonly fnTelemetry: lambda.Function;
   public readonly fnAuthorizer: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ControlPlaneApiProps) {
     super(scope, id);
 
-    const { configsBucket, configTable, launchPackageTable, controlPlaneStateTable } = props;
+    const { configsBucket, configTable, launchPackageTable, controlPlaneStateTable, telemetryTable } = props;
     const region = Stack.of(this).region;
     const account = Stack.of(this).account;
 
@@ -278,6 +280,13 @@ export class ControlPlaneApi extends Construct {
       }),
     );
 
+    // ── fn-telemetry — channel telemetry query ──────────────────────────
+    this.fnTelemetry = mkFn('fn-telemetry', 'telemetry_handler', 256, 15, {
+      TELEMETRY_TABLE_NAME: telemetryTable.tableName,
+    });
+    telemetryTable.grantReadData(this.fnTelemetry);
+    launchPackageTable.grantReadData(this.fnTelemetry);
+
     // ── Tag Extraction — fn-tag-extract ────────────────────────────────
     this.fnTagExtract = mkFn('fn-tag-extract', 'tag_extract_handler', 256, 60);
     this.fnTagExtract.addToRolePolicy(
@@ -369,6 +378,7 @@ export class ControlPlaneApi extends Construct {
       FnAgentRemediateArn: this.lambdaIntegrationUri(this.fnAgentRemediate),
       FnTagExtractArn: this.lambdaIntegrationUri(this.fnTagExtract),
       FnMetricsArn: this.lambdaIntegrationUri(this.fnMetrics),
+      FnTelemetryArn: this.lambdaIntegrationUri(this.fnTelemetry),
       CloudFrontOrigin: 'https://placeholder.cloudfront.net',
     };
 
@@ -421,6 +431,7 @@ export class ControlPlaneApi extends Construct {
       this.fnAgentRemediate,
       this.fnTagExtract,
       this.fnMetrics,
+      this.fnTelemetry,
     ];
     for (const fn of integrationFunctions) {
       fn.addPermission(`ApiGwInvoke-${fn.node.id}`, {
@@ -465,7 +476,8 @@ export class ControlPlaneApi extends Construct {
     const allFunctions = [
       this.fnConfigs, this.fnLaunchPkg, this.fnIotProv, this.fnLogs,
       this.fnGgComp, this.fnIotControl, this.fnAgentCreateConfig,
-      this.fnAgentRemediate, this.fnTagExtract, this.fnMetrics, this.fnAuthorizer,
+      this.fnAgentRemediate, this.fnTagExtract, this.fnMetrics,
+      this.fnTelemetry, this.fnAuthorizer,
     ];
     for (const fn of allFunctions) {
       NagSuppressions.addResourceSuppressions(fn, [

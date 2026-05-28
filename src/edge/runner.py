@@ -52,8 +52,11 @@ _KEY_PATH = _HERE.parent / "iot" / "device.private.key"
 _CA_PATH = _HERE.parent / "iot" / "AmazonRootCA1.pem"
 
 _HEARTBEAT_INTERVAL_S = 5
+_TELEMETRY_INTERVAL_S = 10
 _CREDENTIAL_REFRESH_INTERVAL_S = 21600
 _RECENT_LOG_RING_SIZE = 3
+_TELEMETRY_BUFFER_DIR = _HERE.parent / "telemetry-buffer"
+_TELEMETRY_MAX_PAYLOAD_BYTES = 100_000
 _CREDENTIAL_ENDPOINT_TEMPLATE = (
     "https://{iotEndpoint}/role-aliases/{roleAlias}/credentials"
 )
@@ -72,6 +75,7 @@ _recent_logs_lock = threading.Lock()
 _aws_credentials: dict[str, str] = {}
 _credentials_lock = threading.Lock()
 _diagnostics_enabled = False
+_channel_telemetry_enabled = True
 _otel_processor = None   # set after OTEL init
 _logger_provider = None  # set after OTEL init
 _mqtt_connection = None  # set after MQTT connect
@@ -701,7 +705,7 @@ def _mqtt_reconnect_loop(iot_cfg: dict) -> None:
 
 def _dispatch_control(topic: str, payload: bytes, iot_cfg: dict) -> None:
     """Route incoming MQTT control messages to handlers."""
-    global _diagnostics_enabled, _sfc_proc
+    global _diagnostics_enabled, _channel_telemetry_enabled, _sfc_proc
     try:
         msg = json.loads(payload)
         suffix = topic.split("/")[-1]
@@ -721,6 +725,10 @@ def _dispatch_control(topic: str, payload: bytes, iot_cfg: dict) -> None:
             sfc_version = _detect_sfc_version(sfc_cfg)
             sfc_main_dir = _ensure_sfc_artifacts(sfc_version, sfc_cfg, sfc_bin_dir)
             _restart_sfc(sfc_main_dir, _SFC_CONFIG_PATH, sfc_bin_dir, log_flag)
+
+        elif suffix == "channel-telemetry":
+            _channel_telemetry_enabled = bool(msg.get("enabled", True))
+            logger.info("Channel telemetry set to %s", _channel_telemetry_enabled)
 
         elif suffix == "config-update":
             presigned_url = msg.get("presignedUrl")
@@ -867,6 +875,148 @@ def _heartbeat_loop(iot_cfg: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 7. Telemetry publish (File Target → MQTT)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _telemetry_publish_loop(iot_cfg: dict) -> None:
+    """Read JSON files from File Target output dir, batch, publish to MQTT, delete processed."""
+    _TELEMETRY_BUFFER_DIR.mkdir(parents=True, exist_ok=True)
+    while not _shutdown.is_set():
+        _publish_telemetry_now(iot_cfg)
+        _shutdown.wait(timeout=_TELEMETRY_INTERVAL_S)
+
+
+def _downsample_channels(
+    channels: dict[str, list[dict[str, Any]]], max_points: int = 50
+) -> dict[str, list[dict[str, Any]]]:
+    """If a channel has more than max_points samples, average them down to max_points buckets."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for name, samples in channels.items():
+        if len(samples) <= max_points:
+            result[name] = samples
+            continue
+        bucket_size = len(samples) / max_points
+        downsampled: list[dict[str, Any]] = []
+        for i in range(max_points):
+            start = int(i * bucket_size)
+            end = int((i + 1) * bucket_size)
+            bucket = samples[start:end]
+            if not bucket:
+                continue
+            avg_value = sum(s["value"] for s in bucket if s.get("value") is not None) / len(bucket)
+            mid_ts = bucket[len(bucket) // 2].get("timestamp", "")
+            downsampled.append({"value": round(avg_value, 6), "timestamp": mid_ts})
+        result[name] = downsampled
+    return result
+
+
+def _purge_telemetry_buffer() -> None:
+    """Remove all buffered JSON files to prevent unbounded disk growth."""
+    if not _TELEMETRY_BUFFER_DIR.exists():
+        return
+    for fp in _TELEMETRY_BUFFER_DIR.rglob("*.json"):
+        fp.unlink(missing_ok=True)
+
+
+def _publish_telemetry_now(iot_cfg: dict) -> None:
+    """Read SFC File Target JSON output, collect all channel samples, publish to MQTT."""
+    if not _channel_telemetry_enabled:
+        _purge_telemetry_buffer()
+        return
+    if not _mqtt_connection or not _TELEMETRY_BUFFER_DIR.exists():
+        return
+
+    json_files = sorted(_TELEMETRY_BUFFER_DIR.rglob("*.json"), key=lambda p: p.stat().st_mtime)
+    if not json_files:
+        return
+
+    channels: dict[str, list[dict[str, Any]]] = {}
+    processed_files: list[Path] = []
+
+    for fp in json_files:
+        try:
+            with open(fp) as fh:
+                data = json.load(fh)
+            _extract_channels(data, channels)
+            processed_files.append(fp)
+        except json.JSONDecodeError:
+            pass
+        except Exception:
+            processed_files.append(fp)
+
+    if not channels:
+        for fp in processed_files:
+            fp.unlink(missing_ok=True)
+        return
+
+    channels = _downsample_channels(channels, max_points=50)
+
+    payload = json.dumps({
+        "packageId": iot_cfg["packageId"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "channels": channels,
+    })
+
+    if len(payload.encode()) > _TELEMETRY_MAX_PAYLOAD_BYTES:
+        keys = list(channels.keys())
+        while len(payload.encode()) > _TELEMETRY_MAX_PAYLOAD_BYTES and keys:
+            del channels[keys.pop()]
+            payload = json.dumps({
+                "packageId": iot_cfg["packageId"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "channels": channels,
+            })
+
+    topic = f"sfc/{iot_cfg['packageId']}/telemetry"
+    try:
+        from awscrt.mqtt import QoS as MqttQoS
+        _mqtt_connection.publish(topic=topic, payload=payload, qos=MqttQoS.AT_MOST_ONCE)
+        #logger.info("Telemetry published: %d channels", len(channels))
+    except Exception as exc:
+        logger.warning("Telemetry publish failed: %s", exc)
+
+    for fp in processed_files:
+        fp.unlink(missing_ok=True)
+
+
+def _extract_channels(data: Any, channels: dict[str, list[dict[str, Any]]]) -> None:
+    """
+    Extract channel values from SFC File Target JSON output.
+
+    SFC File Target writes arrays of records:
+    [{"sources": {"<Source>": {"values": {"<Ch>": {"value": v, "timestamp": t}}}}}]
+
+    Collects ALL samples per channel as [{value, timestamp}, ...].
+    """
+    if isinstance(data, list):
+        for item in data:
+            _extract_channels(item, channels)
+        return
+
+    if not isinstance(data, dict):
+        return
+
+    sources = data.get("sources") or data.get("Sources") or {}
+    if isinstance(sources, dict):
+        for source_name, source_data in sources.items():
+            if not isinstance(source_data, dict):
+                continue
+            values = source_data.get("values") or source_data.get("Values") or {}
+            if isinstance(values, dict):
+                for channel_name, channel_data in values.items():
+                    key = f"{source_name}/{channel_name}"
+                    if key not in channels:
+                        channels[key] = []
+                    if isinstance(channel_data, dict):
+                        channels[key].append({
+                            "value": channel_data.get("value", channel_data.get("Value")),
+                            "timestamp": channel_data.get("timestamp", channel_data.get("Timestamp", "")),
+                        })
+                    else:
+                        channels[key].append({"value": channel_data, "timestamp": ""})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 8. Graceful shutdown
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -992,6 +1142,15 @@ def main() -> None:
         name="cred-refresh",
     )
     cred_thread.start()
+
+    # Step 8: Start telemetry publish thread (File Target → MQTT)
+    telemetry_thread = threading.Thread(
+        target=_telemetry_publish_loop,
+        args=(iot_cfg,),
+        daemon=True,
+        name="telemetry",
+    )
+    telemetry_thread.start()
 
     # Wait for shutdown signal — SFC subprocess exit does NOT stop the runner
     logger.info("SFC runner active — waiting for shutdown signal")

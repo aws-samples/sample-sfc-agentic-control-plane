@@ -323,6 +323,27 @@ def _inject_iot_credentials(sfc_config: dict, package_id: str, prov: dict, confi
         for src in sources.values():
             if isinstance(src, dict):
                 src["Metrics"] = {"Enabled": False}
+
+    # ── Inject telemetry File Target (buffers all channel data locally) ──
+    cfg.setdefault("TargetTypes", {}).setdefault("FILE-TARGET", {
+        "JarFiles": ["${MODULES_DIR}/file-target/lib"],
+        "FactoryClassName": "com.amazonaws.sfc.filetarget.FileTargetWriter",
+    })
+    cfg.setdefault("Targets", {})["_SfcTelemetryBuffer"] = {
+        "Active": True,
+        "TargetType": "FILE-TARGET",
+        "Directory": "../telemetry-buffer",
+        "Extension": ".json",
+        "Json": True,
+        "BufferSize": 100,
+        "Compression": "None",
+    }
+    for schedule in cfg.get("Schedules", []):
+        targets_list = schedule.get("Targets", [])
+        if "_SfcTelemetryBuffer" not in targets_list:
+            targets_list.append("_SfcTelemetryBuffer")
+            schedule["Targets"] = targets_list
+
     return cfg
 
 

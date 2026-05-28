@@ -10,6 +10,7 @@ import { NagSuppressions } from 'cdk-nag';
 import { LaunchPackageTables } from './launch-package-tables';
 import { ControlPlaneApi } from './control-plane-api';
 import { SfcHeartbeatRule } from './heartbeat-rule';
+import { SfcTelemetryRule } from './telemetry-rule';
 
 export interface SfcConfigAgentInfraProps {
   agentRole?: iam.IRole;
@@ -29,6 +30,7 @@ export class SfcConfigAgentInfra extends Construct {
   public readonly cpTables: LaunchPackageTables;
   public readonly cpApi: ControlPlaneApi;
   public readonly heartbeatRule: SfcHeartbeatRule;
+  public readonly telemetryRule: SfcTelemetryRule;
   public readonly userPool: cognito.UserPool;
   public readonly userPoolClient: cognito.UserPoolClient;
 
@@ -225,6 +227,7 @@ def handler(event, context):
       configTable: this.filesTable,
       launchPackageTable: this.cpTables.launchPackageTable,
       controlPlaneStateTable: this.cpTables.controlPlaneStateTable,
+      telemetryTable: this.cpTables.telemetryTable,
     });
 
     this.userPool = this.cpApi.userPool;
@@ -233,6 +236,12 @@ def handler(event, context):
     // ── WP-08b: IoT Heartbeat Rule ────────────────────────────────────
     this.heartbeatRule = new SfcHeartbeatRule(this, 'HeartbeatRule', {
       launchPackageTable: this.cpTables.launchPackageTable,
+      layer: this.cpApi.layer,
+    });
+
+    // ── IoT Telemetry Rule ───────────────────────────────────────────
+    this.telemetryRule = new SfcTelemetryRule(this, 'TelemetryRule', {
+      telemetryTable: this.cpTables.telemetryTable,
       layer: this.cpApi.layer,
     });
 

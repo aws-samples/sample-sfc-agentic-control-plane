@@ -14,6 +14,7 @@ import ConfirmDialog from "../components/ConfirmDialog";
 import GgDeployDialog from "../components/GgDeployDialog";
 import TagEditor from "../components/TagEditor";
 import MetricsDashboard from "../components/MetricsDashboard";
+import TelemetryDashboard from "../components/TelemetryDashboard";
 import { useState, useEffect, useRef } from "react";
 import { getUser } from "../auth";
 
@@ -173,6 +174,11 @@ export default function PackageDetail() {
                 </div>
                 <DownloadButton packageId={pkg.packageId} />
               </div>
+            )}
+
+            {/* Live Channel Telemetry */}
+            {pkg.status === "READY" && (
+              <TelemetryDashboard packageId={pkg.packageId} />
             )}
 
             {/* CloudWatch Metrics Dashboard */}

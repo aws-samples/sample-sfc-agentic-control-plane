@@ -8,10 +8,12 @@ import { Construct } from 'constructs';
  * Creates:
  *   - LaunchPackageTable  (PK: packageId, SK: createdAt, GSI: configId-index)
  *   - ControlPlaneStateTable (PK: stateKey — singleton "global")
+ *   - TelemetryTable (PK: packageId, SK: timestamp, TTL: 24h)
  */
 export class LaunchPackageTables extends Construct {
   public readonly launchPackageTable: dynamodb.Table;
   public readonly controlPlaneStateTable: dynamodb.Table;
+  public readonly telemetryTable: dynamodb.Table;
 
   constructor(scope: Construct, id: string) {
     super(scope, id);
@@ -44,6 +46,17 @@ export class LaunchPackageTables extends Construct {
       pointInTimeRecovery: true,
     });
 
+    // ── TelemetryTable ──────────────────────────────────────────────────
+    this.telemetryTable = new dynamodb.Table(this, 'TelemetryTable', {
+      tableName: 'SFC_Channel_Telemetry',
+      partitionKey: { name: 'packageId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'timestamp', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: RemovalPolicy.DESTROY,
+      pointInTimeRecovery: true,
+      timeToLiveAttribute: 'ttl',
+    });
+
     // ── Outputs ────────────────────────────────────────────────────────
     new CfnOutput(this, 'LaunchPackageTableName', {
       value: this.launchPackageTable.tableName,
@@ -60,6 +73,10 @@ export class LaunchPackageTables extends Construct {
     new CfnOutput(this, 'ControlPlaneStateTableArn', {
       value: this.controlPlaneStateTable.tableArn,
       description: 'DynamoDB singleton state table ARN for SFC Control Plane',
+    });
+    new CfnOutput(this, 'TelemetryTableName', {
+      value: this.telemetryTable.tableName,
+      description: 'DynamoDB table for SFC channel telemetry (24h TTL)',
     });
   }
 }
