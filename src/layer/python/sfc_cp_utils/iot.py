@@ -448,6 +448,11 @@ def _build_iot_policy(package_id: str, region: str, account_id: str) -> dict:
                 "Resource": f"arn:aws:iot:{region}:{account_id}:topic/sfc/{package_id}/heartbeat",
             },
             {
+                "Effect": "Allow",
+                "Action": "iot:Publish",
+                "Resource": f"arn:aws:iot:{region}:{account_id}:topic/sfc/{package_id}/telemetry",
+            },
+            {
                 # Required for the IoT credential provider endpoint to accept
                 # the device certificate and vend temporary AWS credentials.
                 "Effect": "Allow",

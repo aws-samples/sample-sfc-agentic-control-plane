@@ -796,6 +796,38 @@ paths:
         uri: "${FnIotControlArn}"
         payloadFormatVersion: "2.0"
 
+  /packages/{packageId}/control/channel-telemetry:
+    put:
+      operationId: setChannelTelemetry
+      summary: Toggle channel value telemetry on/off for a package
+      tags: [control]
+      parameters:
+        - $ref: "#/components/parameters/packageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ToggleRequest"
+      responses:
+        "200":
+          description: Channel telemetry state updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${FnIotControlArn}"
+        payloadFormatVersion: "2.0"
+
   /packages/{packageId}/control/config-update:
     post:
       operationId: pushConfigUpdate
@@ -1010,6 +1042,43 @@ paths:
         type: aws_proxy
         httpMethod: POST
         uri: "${FnMetricsArn}"
+        payloadFormatVersion: "2.0"
+
+  # ────────────────────────────────────────────────────────────────
+  # Channel Telemetry
+  # ────────────────────────────────────────────────────────────────
+
+  /packages/{packageId}/telemetry:
+    get:
+      operationId: getChannelTelemetry
+      summary: Get live channel telemetry data with sparkline history
+      tags: [packages]
+      parameters:
+        - $ref: "#/components/parameters/packageId"
+        - name: lookbackMinutes
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 5
+            maximum: 60
+      responses:
+        "200":
+          description: Channel telemetry with sparkline data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TelemetryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${FnTelemetryArn}"
         payloadFormatVersion: "2.0"
 
   # ────────────────────────────────────────────────────────────────
@@ -1663,6 +1732,43 @@ components:
           type: integer
           description: Chart.js point radius in pixels
       required: [label, data, borderColor]
+
+    # ── Channel Telemetry ────────────────────────────────────────
+
+    TelemetryResponse:
+      type: object
+      properties:
+        packageId:
+          type: string
+        channels:
+          type: array
+          items:
+            $ref: "#/components/schemas/TelemetryChannel"
+        lastUpdated:
+          type: string
+          format: date-time
+          nullable: true
+
+    TelemetryChannel:
+      type: object
+      properties:
+        name:
+          type: string
+          description: "Channel identifier (source/channel)"
+        currentValue:
+          type: number
+          nullable: true
+        sparkline:
+          type: array
+          items:
+            type: number
+          description: Recent values (max 30 points)
+        timestamps:
+          type: array
+          items:
+            type: string
+            format: date-time
+      required: [name, sparkline, timestamps]
 
     # ── Remediation ───────────────────────────────────────────────
 

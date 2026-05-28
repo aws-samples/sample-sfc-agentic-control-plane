@@ -97,6 +97,7 @@ export interface HeartbeatStatus {
 export interface ControlState {
   packageId: string;
   diagnosticsEnabled: boolean;
+  channelTelemetryEnabled: boolean;
   lastConfigUpdateAt?: string;
   lastConfigUpdateVersion?: string;
   lastRestartAt?: string;
@@ -290,6 +291,11 @@ export const setDiagnostics = (packageId: string, enabled: boolean) =>
     .put(`/packages/${packageId}/control/diagnostics`, { enabled })
     .then((r) => r.data);
 
+export const setChannelTelemetry = (packageId: string, enabled: boolean) =>
+  api
+    .put(`/packages/${packageId}/control/channel-telemetry`, { enabled })
+    .then((r) => r.data);
+
 export const pushConfigUpdate = (
   packageId: string,
   configId: string,
@@ -432,6 +438,31 @@ export const getPackageMetrics = (
     .post<ChartJsDataset[]>(`/packages/${packageId}/metrics`, {
       category,
       lookbackMinutes,
+    })
+    .then((r) => r.data);
+
+// ─── Channel Telemetry ──────────────────────────────────────────────────────
+
+export interface TelemetryChannel {
+  name: string;
+  currentValue: number | null;
+  sparkline: number[];
+  timestamps: string[];
+}
+
+export interface TelemetryResponse {
+  packageId: string;
+  channels: TelemetryChannel[];
+  lastUpdated: string | null;
+}
+
+export const getChannelTelemetry = (
+  packageId: string,
+  lookbackMinutes = 5
+) =>
+  api
+    .get<TelemetryResponse>(`/packages/${packageId}/telemetry`, {
+      params: { lookbackMinutes },
     })
     .then((r) => r.data);
 
