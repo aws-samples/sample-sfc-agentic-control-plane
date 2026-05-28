@@ -19,6 +19,7 @@ SFC Agentic Control Plane
     - [Phase 5 — AI-Assisted Remediation](#phase-5--ai-assisted-remediation)
 - [Launch Packages](#launch-packages)
 - [Runtime Controls & Monitoring](#runtime-controls--monitoring)
+- [Live Channel Value Telemetry](#live-channel-value-telemetry)
 - [AI-Assisted Remediation](#ai-assisted-remediation)
 - [AI-Guided Config Generation](#ai-guided-config-generation)
 - [MCP Server — SFC Specification Tools](#mcp-server--sfc-specification-tools)
@@ -434,12 +435,61 @@ Once a package is `READY`, operators control the live edge device from the Packa
 
 | Control | Description |
 |---|---|
+| **Channel Telemetry on/off** | Enable/disable live channel value publishing (default: ON) |
 | **Telemetry on/off** | Enable/disable OTEL CloudWatch log shipping |
 | **Diagnostics on/off** | Switch SFC log level to TRACE |
 | **Push Config Update** | Send a new config version to the edge over MQTT |
 | **Restart SFC** | Graceful SFC subprocess restart |
 
 A live **status LED** (green `ACTIVE` / red `ERROR` / grey `INACTIVE`) reflects device heartbeat, polled every 10 s.
+
+---
+
+## Live Channel Value Telemetry
+
+Every Launch Package automatically includes an injected **SFC File Target** (`_SfcTelemetryBuffer`) that buffers all collected channel data locally as JSON. The edge runner reads these files every 10 seconds, downsamples each channel to a maximum of 50 averaged data points, and publishes the batch to a dedicated MQTT topic (`sfc/{packageId}/telemetry`). An IoT Topic Rule ingests these messages into a DynamoDB table with a 24-hour TTL.
+
+**Architecture:**
+
+```
+SFC (File Target) → telemetry-buffer/*.json → runner.py (10s cycle)
+    → MQTT sfc/{id}/telemetry → IoT Topic Rule → fn-telemetry-ingestion
+    → SFC_Channel_Telemetry (DDB, 24h TTL)
+    → POST /packages/{id}/telemetry → UI TelemetryDashboard
+```
+
+**UI — TelemetryDashboard:**
+
+The Package Detail page displays a live **Channel Values** card with:
+
+- **Table** of all channels showing: channel name, current value, and a Chart.js sparkline trend
+- **Lookback selector:** 15 sec | 30 sec (default) | 1 min | 5 min
+- **Channel search** — appears when more than 10 channels are present (case-insensitive substring filter)
+- **Pagination** — 20 channels per page with Prev/Next controls
+- **Click-to-detail modal** — opens a full-size time-series chart + scrollable data table with all data points
+- **Copy CSV** — exports the selected channel's `timestamp,value` data to clipboard
+
+**API:**
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/packages/{packageId}/telemetry` | Query channel telemetry (body: `{lookbackSeconds}`, max 300) |
+| `PUT` | `/packages/{packageId}/control/channel-telemetry` | Toggle channel telemetry on/off |
+
+**Limits:**
+
+| Limit | Value |
+|---|---|
+| Max data points per channel | 1000 |
+| Max total points across all channels | 10,000 |
+| Max lookback | 300 seconds (5 min) |
+| Edge downsample threshold | 50 points per channel per batch |
+| DynamoDB TTL | 24 hours |
+
+**Toggle behaviour:**
+
+- **ON (default):** Runner publishes channel batches every 10 s; UI displays live sparklines
+- **OFF:** Runner purges the file buffer every 10 s to prevent unbounded disk growth; SFC continues writing to disk but data is discarded
 
 ---
 
