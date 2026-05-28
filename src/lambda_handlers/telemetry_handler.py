@@ -27,7 +27,7 @@ _dynamodb = boto3.resource("dynamodb")
 _telemetry_table = _dynamodb.Table(TELEMETRY_TABLE_NAME)
 _pkg_table = _dynamodb.Table(LAUNCH_PKG_TABLE)
 
-_MAX_SPARKLINE_POINTS = 30
+_MAX_SPARKLINE_POINTS = 1000
 _DEFAULT_LOOKBACK_MINUTES = 5
 _MAX_LOOKBACK_MINUTES = 60
 

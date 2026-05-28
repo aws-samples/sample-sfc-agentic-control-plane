@@ -971,7 +971,7 @@ def _publish_telemetry_now(iot_cfg: dict) -> None:
     try:
         from awscrt.mqtt import QoS as MqttQoS
         _mqtt_connection.publish(topic=topic, payload=payload, qos=MqttQoS.AT_MOST_ONCE)
-        logger.info("Telemetry published: %d channels", len(channels))
+        #logger.info("Telemetry published: %d channels", len(channels))
     except Exception as exc:
         logger.warning("Telemetry publish failed: %s", exc)
 
