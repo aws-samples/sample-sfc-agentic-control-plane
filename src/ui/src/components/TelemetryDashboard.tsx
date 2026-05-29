@@ -39,7 +39,7 @@ const LOOKBACK_OPTIONS = [
   { label: "15 sec", value: 15 },
   { label: "30 sec", value: 30 },
   { label: "1 min", value: 60 },
-  { label: "5 min", value: 300 },
+  { label: "2 min", value: 120 },
 ];
 
 interface Props {
@@ -130,9 +130,11 @@ function ChannelDetailModal({
 
   const handleCopyCsv = () => {
     const header = "timestamp,value";
-    const rows = channel.timestamps.map(
-      (ts, i) => `${ts},${channel.sparkline[i]}`
-    );
+    const rows = channel.timestamps.map((ts, i) => {
+      const val = channel.sparkline[i];
+      const formatted = typeof val === "object" ? JSON.stringify(val) : String(val);
+      return `${ts},"${formatted}"`;
+    });
     const csv = [header, ...rows].join("\n");
     navigator.clipboard.writeText(csv).then(() => {
       setCopied(true);
@@ -170,10 +172,16 @@ function ChannelDetailModal({
           </div>
         </div>
 
-        {/* Chart */}
+        {/* Chart — only for numeric channels */}
+        {typeof channel.sparkline[0] === "number" ? (
         <div className="h-48 mb-4">
           <Line data={chartData} options={chartOptions} />
         </div>
+        ) : (
+        <p className="text-xs text-slate-500 italic mb-4">
+          Non-numeric channel — chart not available.
+        </p>
+        )}
 
         {/* Data table */}
         <div className="flex-1 overflow-auto border border-slate-700 rounded">
@@ -200,7 +208,11 @@ function ChannelDetailModal({
                     } as Intl.DateTimeFormatOptions)}
                   </td>
                   <td className="px-3 py-1.5 font-mono text-sky-300 text-right">
-                    {channel.sparkline[i]?.toFixed(4)}
+                    {typeof channel.sparkline[i] === "number"
+                      ? channel.sparkline[i].toFixed(4)
+                      : typeof channel.sparkline[i] === "object"
+                        ? JSON.stringify(channel.sparkline[i])
+                        : String(channel.sparkline[i] ?? "—")}
                   </td>
                 </tr>
               ))}
@@ -211,17 +223,19 @@ function ChannelDetailModal({
         {/* Footer */}
         <div className="mt-3 flex justify-between text-xs text-slate-500">
           <span>{channel.sparkline.length} data points</span>
-          <span>
-            Min: {Math.min(...channel.sparkline).toFixed(3)} | Max:{" "}
-            {Math.max(...channel.sparkline).toFixed(3)}
-          </span>
+          {typeof channel.sparkline[0] === "number" && (
+            <span>
+              Min: {Math.min(...(channel.sparkline as number[])).toFixed(3)} | Max:{" "}
+              {Math.max(...(channel.sparkline as number[])).toFixed(3)}
+            </span>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 10;
 
 export default function TelemetryDashboard({ packageId }: Props) {
   const [lookback, setLookback] = useState(30);
@@ -338,16 +352,19 @@ export default function TelemetryDashboard({ packageId }: Props) {
                     <td className="py-2 pr-4 font-mono text-xs text-slate-300">
                       {ch.name}
                     </td>
-                    <td className="py-2 pr-4 text-right font-mono text-xs text-sky-300">
-                      {ch.currentValue !== null
+                    <td className="py-2 pr-4 text-right font-mono text-xs text-sky-300 max-w-[200px] truncate">
+                      {ch.currentValue != null
                         ? typeof ch.currentValue === "number"
                           ? ch.currentValue.toFixed(3)
-                          : ch.currentValue
+                          : typeof ch.currentValue === "object"
+                            ? JSON.stringify(ch.currentValue)
+                            : String(ch.currentValue)
                         : "—"}
                     </td>
                     <td className="py-2 pr-4">
-                      {ch.sparkline.length > 1 ? (
-                        <Sparkline data={ch.sparkline} />
+                      {ch.sparkline.length > 1 &&
+                      typeof ch.sparkline[0] === "number" ? (
+                        <Sparkline data={ch.sparkline as number[]} />
                       ) : (
                         <span className="text-xs text-slate-600">—</span>
                       )}

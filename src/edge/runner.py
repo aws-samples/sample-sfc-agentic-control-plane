@@ -895,6 +895,8 @@ def _downsample_channels(
         if len(samples) <= max_points:
             result[name] = samples
             continue
+        first_val = next((s.get("value") for s in samples if s.get("value") is not None), None)
+        numeric = isinstance(first_val, (int, float)) and not isinstance(first_val, bool)
         bucket_size = len(samples) / max_points
         downsampled: list[dict[str, Any]] = []
         for i in range(max_points):
@@ -903,9 +905,12 @@ def _downsample_channels(
             bucket = samples[start:end]
             if not bucket:
                 continue
-            avg_value = sum(s["value"] for s in bucket if s.get("value") is not None) / len(bucket)
             mid_ts = bucket[len(bucket) // 2].get("timestamp", "")
-            downsampled.append({"value": round(avg_value, 6), "timestamp": mid_ts})
+            if numeric:
+                vals = [s["value"] for s in bucket if isinstance(s.get("value"), (int, float)) and not isinstance(s["value"], bool)]
+                downsampled.append({"value": round(sum(vals) / len(vals), 6) if vals else None, "timestamp": mid_ts})
+            else:
+                downsampled.append({"value": bucket[-1].get("value"), "timestamp": mid_ts})
         result[name] = downsampled
     return result
 

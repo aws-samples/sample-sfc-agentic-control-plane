@@ -1065,7 +1065,7 @@ paths:
                 lookbackSeconds:
                   type: integer
                   default: 30
-                  maximum: 300
+                  maximum: 120
       responses:
         "200":
           description: Channel telemetry with sparkline data

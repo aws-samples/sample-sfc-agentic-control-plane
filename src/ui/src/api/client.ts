@@ -445,8 +445,9 @@ export const getPackageMetrics = (
 
 export interface TelemetryChannel {
   name: string;
-  currentValue: number | null;
-  sparkline: number[];
+  currentValue: number | string | boolean | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sparkline: any[];
   timestamps: string[];
 }
 

@@ -12,6 +12,8 @@ import logging
 import os
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
+from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -30,7 +32,18 @@ _pkg_table = _dynamodb.Table(LAUNCH_PKG_TABLE)
 _MAX_SPARKLINE_POINTS = 1000
 _MAX_TOTAL_POINTS = 10000
 _DEFAULT_LOOKBACK_SECONDS = 30
-_MAX_LOOKBACK_SECONDS = 300
+_MAX_LOOKBACK_SECONDS = 120
+
+
+def _to_json_value(val: Any) -> Any:
+    """Convert DynamoDB Decimal to float; pass strings, bools, lists as-is."""
+    if isinstance(val, Decimal):
+        return float(val)
+    if isinstance(val, list):
+        return [_to_json_value(v) for v in val]
+    if isinstance(val, dict):
+        return {k: _to_json_value(v) for k, v in val.items()}
+    return val
 
 
 def handler(event: dict, _context) -> dict:
@@ -57,7 +70,7 @@ def handler(event: dict, _context) -> dict:
 
     items = _query_telemetry(package_id, start_iso)
 
-    channel_data: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    channel_data: dict[str, list] = defaultdict(list)
     for item in items:
         batch_ts = item.get("timestamp", "")
         channels = item.get("channels", {})
@@ -66,16 +79,12 @@ def handler(event: dict, _context) -> dict:
                 if isinstance(ch_value, list):
                     for sample in ch_value:
                         if isinstance(sample, dict):
-                            try:
-                                ts = sample.get("timestamp") or batch_ts
-                                channel_data[ch_name].append((ts, float(sample["value"])))
-                            except (ValueError, TypeError, KeyError):
-                                pass
-                else:
-                    try:
-                        channel_data[ch_name].append((batch_ts, float(ch_value)))
-                    except (ValueError, TypeError):
-                        pass
+                            ts = sample.get("timestamp") or batch_ts
+                            val = sample.get("value")
+                            if val is not None:
+                                channel_data[ch_name].append((ts, val))
+                elif ch_value is not None:
+                    channel_data[ch_name].append((batch_ts, ch_value))
 
     result_channels = []
     total_points = 0
@@ -87,10 +96,11 @@ def handler(event: dict, _context) -> dict:
         per_channel_cap = min(_MAX_SPARKLINE_POINTS, remaining_budget)
         recent = points[-per_channel_cap:]
         total_points += len(recent)
+        values = [_to_json_value(p[1]) for p in recent]
         result_channels.append({
             "name": name,
-            "currentValue": recent[-1][1] if recent else None,
-            "sparkline": [p[1] for p in recent],
+            "currentValue": values[-1] if values else None,
+            "sparkline": values,
             "timestamps": [p[0] for p in recent],
         })
 
